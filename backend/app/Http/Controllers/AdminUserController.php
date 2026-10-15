@@ -12,7 +12,12 @@ class AdminUserController extends Controller
 {
     public function index(Request $request)
     {
-        $query = User::with('profile')
+        $query = User::with([
+                'profile.barangay',
+                'applications' => function ($q) {
+                    $q->with('category')->orderBy('created_at', 'desc');
+                }
+            ])
             ->withCount([
                 'documents as doc_count' => function ($q) {
                     $q->where('review_status', '!=', 'replaced');
@@ -61,10 +66,10 @@ class AdminUserController extends Controller
 
         $users = $query->paginate(25);
 
-        // Transform to include computed status fields
+        // Transform to include computed status fields without N+1 query execution
         $users->getCollection()->transform(function ($user) {
             $profile = $user->profile;
-            $latestApp = $user->applications()->with(['category'])->orderBy('created_at', 'desc')->first();
+            $latestApp = $user->applications->first();
 
             $user->profile_complete = (bool) ($profile && $profile->is_profile_complete && $latestApp && $latestApp->is_form_complete);
             $user->barangay_name = $profile?->barangay?->name ?? null;
@@ -124,11 +129,33 @@ class AdminUserController extends Controller
             'is_active' => 'required|boolean',
         ]);
 
-        $user = User::findOrFail($id);
+        $actor = $request->user();
+        $user  = User::findOrFail($id);
+
+        // QA-P1-04: Prevent self-deactivation / administrative lockout
+        if ($actor->id === $user->id && !$request->is_active) {
+            return response()->json([
+                'detail' => 'You cannot deactivate your own administrative account.',
+            ], 422);
+        }
+
+        // QA-P1-04: Ordinary admins cannot alter status of super administrators or other admins
+        if (in_array($user->role, ['admin', 'super_admin']) && $actor->role !== 'super_admin') {
+            return response()->json([
+                'detail' => 'Unauthorized. Only super administrators can modify administrative staff status.',
+            ], 403);
+        }
+
         $user->update(['is_active' => $request->is_active]);
+
+        // QA-P1-04: Revoke all active bearer tokens upon suspension
+        if (!$request->is_active) {
+            $user->tokens()->delete();
+        }
 
         AuditLog::record($request, $request->is_active ? 'user.activated' : 'user.suspended', 'User', $user->id, [
             'user_email' => $user->email,
+            'actor_email' => $actor->email,
         ]);
 
         return response()->json($user->fresh());
@@ -157,6 +184,9 @@ class AdminUserController extends Controller
 
         $user->update(['password_hash' => Hash::make($newPass)]);
 
+        // QA-P2-01: Revoke all active sessions upon administrative password reset
+        $user->tokens()->delete();
+
         AuditLog::record($request, 'user.password_reset', 'User', $user->id, [
             'user_email'   => $user->email,
             'target_role'  => $user->role,
@@ -173,31 +203,50 @@ class AdminUserController extends Controller
     public function store(Request $request)
     {
         $actor = $request->user();
-        if (!$actor || $actor->role !== 'super_admin') {
+
+        $request->validate([
+            'full_name' => 'required|string|max:200',
+            'email'     => 'required|email|unique:users,email',
+            'role'      => 'required|in:applicant,admin,super_admin',
+            'password'  => 'required|string|min:8',
+        ]);
+
+        // QA-P1-12: Only super administrators can create staff or administrator accounts
+        if (in_array($request->role, ['admin', 'super_admin']) && (!$actor || $actor->role !== 'super_admin')) {
             return response()->json([
                 'detail' => 'Unauthorized. Only super administrators can create staff or administrator accounts.',
             ], 403);
         }
 
-        $request->validate([
-            'full_name' => 'required|string|max:200',
-            'email'     => 'required|email|unique:users,email',
-            'role'      => 'required|in:admin,super_admin',
-            'password'  => 'required|string|min:8',
+        $user = User::create([
+            'full_name'         => $request->full_name,
+            'email'             => $request->email,
+            'role'              => $request->role,
+            'password_hash'     => Hash::make($request->password),
+            'auth_provider'     => 'local',
+            'is_active'         => true,
+            'email_verified_at' => now(),
+            'dpa_consent'       => true,
+            'dpa_consented_at'  => now(),
+            'dpa_consent_ip'    => $request->ip(),
         ]);
 
-        $user = User::create([
-            'full_name'      => $request->full_name,
-            'email'          => $request->email,
-            'role'           => $request->role,
-            'password_hash'  => Hash::make($request->password),
-            'auth_provider'  => 'local',
-            'is_active'      => true,
-        ]);
+        // QA-P1-12: Provision applicant profile if created role is applicant
+        if ($user->role === 'applicant') {
+            $parts = explode(' ', trim($request->full_name), 2);
+            \App\Models\ApplicantProfile::firstOrCreate(
+                ['user_id' => $user->id],
+                [
+                    'first_name' => $parts[0] ?? $request->full_name,
+                    'last_name'  => $parts[1] ?? '',
+                ]
+            );
+        }
 
         AuditLog::record($request, 'user.created', 'User', $user->id, [
-            'email' => $user->email,
-            'role'  => $user->role,
+            'email'      => $user->email,
+            'role'       => $user->role,
+            'created_by' => $actor->email,
         ]);
 
         return response()->json($user, 201);

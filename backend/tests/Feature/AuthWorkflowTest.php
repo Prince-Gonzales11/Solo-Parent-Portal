@@ -160,39 +160,47 @@ class AuthWorkflowTest extends TestCase
         $logoutRes->assertStatus(200);
     }
 
-    public function test_captcha_generation_and_validation(): void
+    public function test_registration_works_without_captcha_and_without_honeypot(): void
     {
-        $captchaRes = $this->getJson('/api/auth/captcha');
-        $captchaRes->assertStatus(200);
-        $captchaRes->assertJsonStructure(['captcha_id', 'question']);
+        $payload = [
+            'first_name' => 'Ana',
+            'last_name' => 'Gonzales',
+            'email' => 'ana.gonzales@example.com',
+        ];
 
-        $captchaId = $captchaRes->json('captcha_id');
-        $question = $captchaRes->json('question');
-        $this->assertNotEmpty($captchaId);
-        $this->assertStringContainsString('=', $question);
-
-        // Incorrect captcha answer fails
-        $invalidRes = $this->postJson('/api/auth/register/start', [
-            'first_name' => 'Maria',
-            'last_name' => 'Test',
-            'email' => 'captcha.test@example.com',
-            'captcha_id' => $captchaId,
-            'captcha_answer' => '999999',
+        $res = $this->postJson('/api/auth/register/start', $payload);
+        $res->assertStatus(200);
+        $res->assertJson([
+            'requires_verification' => true,
+            'is_mobile' => false,
         ]);
-        $invalidRes->assertStatus(422);
-        $invalidRes->assertJsonValidationErrors(['captcha']);
+
+        $userId = $res->json('user_id');
+        $this->assertNotEmpty($userId);
+        $this->assertDatabaseHas('users', [
+            'id' => $userId,
+            'email' => 'ana.gonzales@example.com',
+            'is_active' => false,
+        ]);
+        $this->assertDatabaseHas('email_verifications', ['user_id' => $userId]);
     }
 
-    public function test_registration_rejects_honeypot_bot_submissions(): void
+    public function test_registration_validates_required_fields_and_formats(): void
     {
-        $res = $this->postJson('/api/auth/register/start', [
-            'first_name' => 'Bot',
-            'last_name' => 'User',
-            'email' => 'bot@example.com',
-            'website' => 'https://spam-bot.xyz',
+        // Missing names
+        $resNoName = $this->postJson('/api/auth/register/start', [
+            'email' => 'noname@example.com',
         ]);
-        $res->assertStatus(422);
-        $res->assertJsonFragment(['message' => 'Spam bot submission detected.']);
+        $resNoName->assertStatus(422);
+        $resNoName->assertJsonValidationErrors(['first_name', 'last_name']);
+
+        // Missing identifier
+        $resNoId = $this->postJson('/api/auth/register/start', [
+            'first_name' => 'John',
+            'last_name' => 'Doe',
+        ]);
+        $resNoId->assertStatus(422);
+        $resNoId->assertJsonValidationErrors(['email']);
     }
 
     public function test_registration_rate_limiting_enforcement(): void

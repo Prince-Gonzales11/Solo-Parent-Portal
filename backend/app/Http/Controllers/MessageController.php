@@ -141,7 +141,17 @@ class MessageController extends Controller
 
         if (!$isAdmin) {
             // Applicant sending to CSWDD Office
-            if (!$applicationId) {
+            if ($applicationId) {
+                // QA-P1-05: Enforce strict application ownership
+                $ownedApp = Application::where('id', $applicationId)
+                    ->where('user_id', $user->id)
+                    ->first();
+                if (!$ownedApp) {
+                    return response()->json([
+                        'message' => 'Unauthorized. The specified application does not belong to your account.',
+                    ], 403);
+                }
+            } else {
                 $activeApp = Application::where('user_id', $user->id)
                     ->whereNotIn('status', ['cancelled', 'expired', 'completed', 'released'])
                     ->latest()
@@ -181,6 +191,16 @@ class MessageController extends Controller
 
             if (!$recipientId) {
                 return response()->json(['detail' => 'Recipient applicant is required.'], 422);
+            }
+
+            // QA-P1-05: If application_id is provided, verify it belongs to the intended recipient
+            if ($applicationId) {
+                $app = Application::find($applicationId);
+                if ($app && $app->user_id !== $recipientId) {
+                    return response()->json([
+                        'detail' => 'The selected application does not belong to the specified recipient.',
+                    ], 422);
+                }
             }
 
             $message = Message::create([

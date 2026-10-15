@@ -50,4 +50,3 @@ npm run dev
 - **Applicant Portal**: Solo parents can submit applications, upload documentary requirements, complete their profile, and track their application status dynamically.
 - **Admin Dashboard**: CSWDD administrators can review documents, approve or disqualify applicants, generate ID cards (PDFs), and view system analytics.
 - **Automated Notifications**: In-app notifications for status changes and automated daily cron jobs for ID renewal reminders.
->>>>>>> f685886 (feat: initial commit of Solo Parent Portal System with technical audit and QA documentation)

@@ -29,6 +29,12 @@
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
+        <env name="FILESYSTEM_DISK" value="local"/>
+        <env name="SUPABASE_URL" value="https://mock.supabase.co"/>
+        <env name="SUPABASE_SERVICE_KEY" value="mock-service-key-for-local-testing"/>
+        <env name="GOOGLE_CLIENT_ID" value="mock-testing-google-client-id"/>
+        <env name="GOOGLE_CLIENT_SECRET" value="mock-testing-google-client-secret"/>
+        <env name="GOOGLE_REDIRECT_URI" value="http://localhost:8000/api/google/callback"/>
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>

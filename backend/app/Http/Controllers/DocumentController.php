@@ -7,6 +7,7 @@ use App\Models\Application;
 use App\Models\AuditLog;
 use App\Models\Category;
 use App\Models\Document;
+use App\Models\DocumentaryRequirement;
 use App\Models\Notification;
 use App\Services\SupabaseStorageService;
 use App\Services\StoragePathBuilder;
@@ -179,9 +180,9 @@ class DocumentController extends Controller
         // ── Resolve application ───────────────────────────────────────
         $applicationId = $request->application_id;
         if (!$applicationId) {
-            // Try to find user's current active application
+            // Try to find user's current editable application
             $app = Application::where('user_id', $user->id)
-                ->whereNotIn('status', ['rejected', 'expired'])
+                ->whereIn('status', ['draft', 'requirements_submitted', 'qualified', 'for_document_correction'])
                 ->orderBy('created_at', 'desc')
                 ->first();
             $applicationId = $app?->id;
@@ -195,8 +196,16 @@ class DocumentController extends Controller
             }
         }
 
-        if (!$applicationId) {
+        if (!$applicationId || !$app) {
             return response()->json(['detail' => 'You must start an application before uploading documents.'], 400);
+        }
+
+        // QA-P1-07: Enforce application lifecycle state - reject uploads on finalized/approved records
+        $immutableStatuses = ['approved', 'ready_for_pickup', 'claimed', 'released', 'completed'];
+        if (in_array($app->status, $immutableStatuses)) {
+            return response()->json([
+                'detail' => "This application is currently in '{$app->status}' status and cannot accept new document uploads.",
+            ], 422);
         }
 
         // ── Resolve requirement id ───────────────────────────────────────────
@@ -240,6 +249,22 @@ class DocumentController extends Controller
 
         if (!$requirementId) {
             return response()->json(['detail' => 'Invalid document type or requirement not found.'], 400);
+        }
+
+        // QA-P2-05: Verify that the resolved requirement belongs to this application's category or is general
+        if ($app->category_id) {
+            $isValidReq = DocumentaryRequirement::where('id', $requirementId)
+                ->where(function ($query) use ($app) {
+                    $query->where('category_id', $app->category_id)
+                          ->orWhereNull('category_id');
+                })
+                ->exists();
+
+            if (!$isValidReq) {
+                return response()->json([
+                    'detail' => 'The specified documentary requirement does not belong to this application category.',
+                ], 422);
+            }
         }
 
         // ── Duplicate file prevention (exact same filename + size under same requirement) ───
@@ -367,6 +392,14 @@ class DocumentController extends Controller
         }
         if ($oldDoc->user_id !== $user->id) {
             return response()->json(['detail' => 'Unauthorized action.'], 403);
+        }
+
+        // QA-P1-07: Reject replacement if application has reached finalized status
+        $app = $oldDoc->application;
+        if ($app && in_array($app->status, ['approved', 'ready_for_pickup', 'claimed', 'released', 'completed'])) {
+            return response()->json([
+                'detail' => "Cannot replace documents for an application in '{$app->status}' status.",
+            ], 422);
         }
 
         // Prevent replacement only if document has already been verified/approved or is currently under official review
@@ -582,6 +615,14 @@ class DocumentController extends Controller
         }
         if ($doc->user_id !== $request->user()->id) {
             return response()->json(['detail' => 'Unauthorized action.'], 403);
+        }
+
+        // QA-P1-07: Reject deletion if application is finalized
+        $app = $doc->application;
+        if ($app && in_array($app->status, ['approved', 'ready_for_pickup', 'claimed', 'released', 'completed'])) {
+            return response()->json([
+                'detail' => "Cannot delete documents from an application that is in '{$app->status}' status.",
+            ], 422);
         }
 
         // Only allow deletion of submitted/pending documents (not approved/under_review)

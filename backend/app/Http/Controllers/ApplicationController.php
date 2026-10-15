@@ -1198,16 +1198,20 @@ class ApplicationController extends Controller
         'approved'            => ['ready_for_pickup', 'completed', 'released', 'under_review', 'rejected'],
         'rejected'            => ['under_review', 'draft'],  // reopen or re-apply
         'ready_for_pickup'    => ['completed', 'released', 'under_review', 'reopened_for_review'],
-        'completed'           => ['under_review', 'reopened_for_review'],
-        'released'            => ['under_review', 'reopened_for_review'],
+        'completed'           => ['reopened_for_review'],
+        'released'            => ['reopened_for_review'],
         'reopened_for_review' => ['under_review', 'approved', 'rejected'],
         'qualified'           => ['approved', 'rejected', 'ready_for_pickup', 'under_review'],
+        'cancelled'           => [],
+        'expired'             => [],
     ];
 
     public function adminUpdateStatus($id, Request $request)
     {
+        $validStatuses = array_keys(self::STATUS_TRANSITIONS);
+
         $request->validate([
-            'status' => 'required|string',
+            'status' => ['required', 'string', \Illuminate\Validation\Rule::in($validStatuses)],
             'note'   => 'nullable|string',
         ]);
 
@@ -1233,11 +1237,17 @@ class ApplicationController extends Controller
             ], 200);
         }
 
-        // Enforce valid status transitions
-        $allowedTransitions = self::STATUS_TRANSITIONS[$oldStatus] ?? [];
-        if (!empty($allowedTransitions) && !in_array($status, $allowedTransitions)) {
+        // QA-P1-08: Enforce valid status transitions with fail-closed guarantee
+        if (!array_key_exists($oldStatus, self::STATUS_TRANSITIONS)) {
             return response()->json([
-                'detail' => "Cannot transition from '{$oldStatus}' to '{$status}'. Allowed transitions: " . implode(', ', $allowedTransitions) . '.',
+                'detail' => "Current status '{$oldStatus}' is not recognized or does not allow transitions.",
+            ], 422);
+        }
+
+        $allowedTransitions = self::STATUS_TRANSITIONS[$oldStatus];
+        if (!in_array($status, $allowedTransitions)) {
+            return response()->json([
+                'detail' => "Cannot transition from '{$oldStatus}' to '{$status}'. Allowed transitions: " . (empty($allowedTransitions) ? 'none (terminal state)' : implode(', ', $allowedTransitions)) . '.',
             ], 422);
         }
 

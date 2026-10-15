@@ -141,7 +141,7 @@ export default function AdminUsers() {
           </p>
         </div>
         <Button onClick={() => setCreateOpen(true)} className="w-full sm:w-auto min-h-[44px] font-semibold">
-          <Plus className="mr-2 h-4 w-4" /> Create Admin Account
+          <Plus className="mr-2 h-4 w-4" /> Create User Account
         </Button>
       </div>
 
@@ -343,20 +343,21 @@ export default function AdminUsers() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Create Admin Account</DialogTitle>
-            <DialogDescription>Create a new CSWDD staff account with admin access.</DialogDescription>
+            <DialogTitle>Create User Account</DialogTitle>
+            <DialogDescription>Create a new CSWDD staff or applicant account.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2"><Label>Full Name</Label>
               <Input value={form.full_name} onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))} placeholder="e.g. Maria Santos" /></div>
             <div className="space-y-2"><Label>Email Address</Label>
-              <Input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="admin@cswdd.gov.ph" /></div>
+              <Input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="user@cswdd.gov.ph" /></div>
             <div className="space-y-2"><Label>Role</Label>
               <Select value={form.role} onValueChange={v => setForm(f => ({ ...f, role: v }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="admin">Admin</SelectItem>
                   <SelectItem value="super_admin">Super Admin</SelectItem>
+                  <SelectItem value="applicant">Applicant</SelectItem>
                 </SelectContent>
               </Select>
             </div>

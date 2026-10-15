@@ -22,7 +22,6 @@ use App\Http\Controllers\GoogleAuthController;
 // -------------------------------------------------------------------------
 // Public routes (no authentication required) — Rate limited for brute-force protection
 // -------------------------------------------------------------------------
-Route::get('/auth/captcha',         [AuthController::class, 'getCaptcha'])->middleware('throttle:60,1');
 Route::post('/auth/register/start', [AuthController::class, 'registerStart'])->middleware('throttle:15,1');
 Route::post('/auth/register',       [AuthController::class, 'registerComplete'])->middleware('throttle:15,1');
 Route::post('/auth/login',         [AuthController::class, 'login'])->middleware('throttle:5,1');

@@ -11,7 +11,8 @@ class SupabaseStorageService
     protected string $serviceKey;
     protected string $defaultBucket;
     protected string $tempBucket;
-    protected bool $verifySsl;
+    /** @var bool|string */
+    protected $verifySsl;
 
     public function __construct()
     {
@@ -19,7 +20,14 @@ class SupabaseStorageService
         $this->serviceKey = config('services.supabase.service_key', env('SUPABASE_SERVICE_KEY'));
         $this->defaultBucket = config('services.supabase.bucket', env('AWS_BUCKET', 'solo-parent-documents'));
         $this->tempBucket = config('services.supabase.temp_bucket', env('SUPABASE_TEMP_BUCKET', 'solo-parent-temp'));
-        $this->verifySsl = (bool) config('services.supabase.ssl_verify', app()->environment('production'));
+        
+        $sslVerify = config('services.supabase.ssl_verify', app()->environment('production'));
+        $caBundle = config('services.supabase.ca_bundle', storage_path('certificates/ca-bundle.crt'));
+        if ($sslVerify && file_exists($caBundle)) {
+            $this->verifySsl = $caBundle;
+        } else {
+            $this->verifySsl = (bool) $sslVerify;
+        }
     }
 
     /**

@@ -38,6 +38,7 @@ const LONG_CACHE_TTL = 180000;   // 3 minutes for static reference data
 
 export function clearApiCache() {
   cache.clear();
+  inFlight.clear();
 }
 
 // Wrap api.get with intelligent caching & deduplication
@@ -48,9 +49,11 @@ api.get = function (url, config = {}) {
     return originalGet(url, config);
   }
 
-  // Construct cache key including params
+  // QA-P2-04: Construct cache key scoped to current session token to prevent cross-account cache bleed
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+  const authScope = token ? token.slice(-16) : 'anon';
   const paramKey = config.params ? JSON.stringify(config.params) : '';
-  const cacheKey = `${url}?${paramKey}`;
+  const cacheKey = `${authScope}:${url}?${paramKey}`;
   const now = Date.now();
 
   // Check valid cache entry

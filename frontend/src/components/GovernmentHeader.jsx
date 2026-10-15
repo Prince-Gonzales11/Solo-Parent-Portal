@@ -127,7 +127,7 @@ export default function GovernmentHeader() {
               alt="City of Butuan Seal" 
               className="h-6 w-6 object-contain shrink-0" 
             />
-            <span className="font-bold text-[11px] sm:text-xs text-[#0e4b65] dark:text-white uppercase tracking-wider">
+            <span className="hidden sm:inline font-bold text-[11px] sm:text-xs text-[#0e4b65] dark:text-white uppercase tracking-wider">
               City of Butuan
             </span>
           </div>

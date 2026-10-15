@@ -45,7 +45,7 @@ const isValidEmail = (value) => {
 export default function Register() {
   const navigate = useNavigate();
 
-  // Form state (includes honeypot website field)
+  // Form state
   const [form, setForm] = useState({
     first_name: '',
     middle_name: '',
@@ -54,18 +54,12 @@ export default function Register() {
     password: '',
     confirmPassword: '',
     dpa_consent: false,
-    website: '', // honeypot
   });
   const [fieldErrors, setFieldErrors] = useState({});
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [googleLoading, setGoogleLoading] = useState(false);
-
-  // Security CAPTCHA state
-  const [captcha, setCaptcha] = useState({ id: '', question: '' });
-  const [captchaAnswer, setCaptchaAnswer] = useState('');
-  const [captchaLoading, setCaptchaLoading] = useState(false);
 
   // Legal Pop-up Modal state
   const [legalModalOpen, setLegalModalOpen] = useState(false);
@@ -86,25 +80,6 @@ export default function Register() {
   const [resending, setResending] = useState(false);
   const [cooldown, setCooldown] = useState(0);
   const inputRefs = useRef([]);
-
-  const fetchCaptcha = useCallback(async () => {
-    setCaptchaLoading(true);
-    try {
-      const res = await api.get('/auth/captcha');
-      if (res.data) {
-        setCaptcha({ id: res.data.captcha_id, question: res.data.question });
-        setCaptchaAnswer('');
-      }
-    } catch (err) {
-      console.warn('Failed to fetch security puzzle:', err);
-    } finally {
-      setCaptchaLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchCaptcha();
-  }, [fetchCaptcha]);
 
   const openLegalModal = (tab = 'terms') => {
     setLegalModalTab(tab);
@@ -180,13 +155,9 @@ export default function Register() {
       errs.email = 'Please enter a valid email address or mobile number.';
     }
 
-    if (!captchaAnswer?.trim()) {
-      errs.captcha = 'Please solve the security calculation.';
-    }
-
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
-      toast.error(errs.first_name || errs.last_name || errs.email || errs.captcha || 'Please enter all required fields.');
+      toast.error(errs.first_name || errs.last_name || errs.email || 'Please enter all required fields.');
       scrollToAndFocus(Object.keys(errs)[0]);
       return;
     }
@@ -206,9 +177,6 @@ export default function Register() {
         full_name: fullName,
         email: normalizedIdentifier,
         identifier: normalizedIdentifier,
-        captcha_id: captcha.id,
-        captcha_answer: captchaAnswer.trim(),
-        website: form.website || '', // honeypot
       });
 
       setUserId(res.data.user_id);
@@ -227,14 +195,8 @@ export default function Register() {
       const status = err.response?.status;
       const detail = err.response?.data?.message || '';
 
-      // Refresh puzzle on verification error
-      fetchCaptcha();
-
       if (status === 409) {
         setError(detail || (isMobile ? 'An account with this mobile number already exists. Please sign in instead.' : 'An account with this email address already exists. Please sign in instead.'));
-      } else if (err.response?.data?.errors?.captcha) {
-        setError(err.response.data.errors.captcha[0] || 'Security verification failed.');
-        setFieldErrors(prev => ({ ...prev, captcha: err.response.data.errors.captcha[0] }));
       } else {
         setError(detail || 'Failed to proceed. Please try again.');
       }
@@ -530,18 +492,6 @@ export default function Register() {
                   </div>
                 </div>
 
-                {/* Honeypot field for bot trapping */}
-                <input
-                  type="text"
-                  name="website"
-                  value={form.website || ''}
-                  onChange={handleChange}
-                  tabIndex={-1}
-                  autoComplete="off"
-                  aria-hidden="true"
-                  style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', height: 0, width: 0 }}
-                />
-
                 <div className="space-y-2">
                   <Label htmlFor="email" className={fieldErrors.email ? 'text-destructive font-medium' : ''}>
                     Email or Mobile Number <span className="text-destructive font-bold">*</span>
@@ -565,54 +515,6 @@ export default function Register() {
                     </p>
                   )}
                 </div>
-
-                {/* Security CAPTCHA Calculation */}
-                {flowState === 'email' && (
-                  <div className="p-3.5 rounded-2xl border border-border/80 bg-muted/20 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground">
-                      <span className="flex items-center gap-1.5 text-foreground font-medium">
-                        <Shield className="h-3.5 w-3.5 text-primary" /> Security Verification
-                      </span>
-                      <button
-                        type="button"
-                        onClick={fetchCaptcha}
-                        disabled={captchaLoading}
-                        className="inline-flex items-center gap-1 text-primary hover:underline text-[11px] cursor-pointer"
-                      >
-                        <RefreshCw className={`h-3 w-3 ${captchaLoading ? 'animate-spin' : ''}`} />
-                        New Puzzle
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className="px-3 py-2 rounded-xl bg-card border font-mono font-bold text-sm tracking-wide text-foreground shadow-2xs select-none shrink-0 min-w-[100px] text-center">
-                        {captchaLoading ? '...' : (captcha.question || 'Loading...')}
-                      </div>
-                      <Input
-                        id="captcha_answer"
-                        type="text"
-                        inputMode="numeric"
-                        placeholder="Your answer"
-                        value={captchaAnswer}
-                        onChange={(e) => {
-                          setCaptchaAnswer(e.target.value);
-                          if (fieldErrors.captcha) {
-                            setFieldErrors(prev => {
-                              const c = { ...prev };
-                              delete c.captcha;
-                              return c;
-                            });
-                          }
-                        }}
-                        className={`h-10 text-sm font-semibold ${fieldErrors.captcha ? ERROR_INPUT_CLASS : ''}`}
-                      />
-                    </div>
-                    {fieldErrors.captcha && (
-                      <p className="text-xs text-destructive font-medium flex items-center gap-1">
-                        <AlertCircle className="h-3.5 w-3.5 shrink-0" />{fieldErrors.captcha}
-                      </p>
-                    )}
-                  </div>
-                )}
 
                 {flowState === 'email' && (
                   <Button onClick={handleSendCode} disabled={loading} className="w-full h-11 font-bold">

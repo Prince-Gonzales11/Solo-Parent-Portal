@@ -28,77 +28,12 @@ class AuthController extends Controller
     private const RESEND_COOLDOWN_SECONDS = 60;
 
     /**
-     * Generate a lightweight mathematical CAPTCHA challenge for registration security.
-     */
-    public function getCaptcha()
-    {
-        $num1 = rand(4, 20);
-        $num2 = rand(1, 12);
-        $isAdd = rand(0, 1) === 1;
-
-        if (!$isAdd && $num1 < $num2) {
-            $temp = $num1;
-            $num1 = $num2;
-            $num2 = $temp;
-        }
-
-        $op = $isAdd ? '+' : '-';
-        $answer = $isAdd ? ($num1 + $num2) : ($num1 - $num2);
-
-        $captchaId = (string) Str::uuid();
-        Cache::put("reg_captcha:{$captchaId}", (string) $answer, now()->addMinutes(10));
-
-        return response()->json([
-            'captcha_id' => $captchaId,
-            'question'   => "{$num1} {$op} {$num2} = ?",
-        ]);
-    }
-
-    /**
-     * Verify and single-use consume a registration CAPTCHA.
-     */
-    private function verifyCaptcha(?string $captchaId, ?string $answer): bool
-    {
-        if (empty($captchaId) || $answer === null || trim($answer) === '') {
-            return false;
-        }
-
-        $expected = Cache::pull("reg_captcha:{$captchaId}");
-        if ($expected === null) {
-            return false;
-        }
-
-        return trim((string) $expected) === trim((string) $answer);
-    }
-
-    /**
      * Step 1: Start registration by creating a pending user and sending verification code (for email)
      * or skipping straight to password creation (for Philippine mobile number).
      */
     public function registerStart(Request $request)
     {
-        // 1. Honeypot protection against automated spam bots
-        if ($request->filled('website') || $request->filled('honeypot_field')) {
-            return response()->json([
-                'message' => 'Spam bot submission detected.'
-            ], 422);
-        }
-
-        // 2. CAPTCHA verification (enforced in production/local, or in testing when provided)
-        if (!app()->environment('testing') || $request->has('captcha_id') || $request->has('captcha_answer')) {
-            $captchaId = $request->input('captcha_id');
-            $captchaAnswer = $request->input('captcha_answer');
-            if (!$this->verifyCaptcha($captchaId, $captchaAnswer)) {
-                return response()->json([
-                    'message' => 'Security verification failed. Please enter the correct calculation answer.',
-                    'errors' => [
-                        'captcha' => ['Please enter the correct answer to the security math puzzle.']
-                    ]
-                ], 422);
-            }
-        }
-
-        // 3. Fine-grained rate limiting (Prevents 100-account flooding while allowing legitimate traffic)
+        // 1. Fine-grained rate limiting (Prevents 100-account flooding while allowing legitimate traffic)
         $ipThrottleKey = 'reg_start_ip:' . $request->ip();
         if (RateLimiter::tooManyAttempts($ipThrottleKey, 15)) {
             $retryAfter = RateLimiter::availableIn($ipThrottleKey);
