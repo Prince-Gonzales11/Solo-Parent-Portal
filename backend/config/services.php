@@ -42,6 +42,7 @@ return [
     ],
 
     'supabase' => [
+        'driver' => env('SUPABASE_STORAGE_DRIVER', 'supabase'),
         'url' => env('SUPABASE_URL'),
         'service_key' => env('SUPABASE_SERVICE_KEY'),
         'bucket' => env('AWS_BUCKET', 'solo-parent-portal-documents'),

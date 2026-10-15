@@ -43,15 +43,13 @@ const AdminResources = React.lazy(() => import('@/pages/admin/AdminResources'));
 const ApplicationDetail = React.lazy(() => import('@/pages/admin/ApplicationDetail'));
 const ApplicantDetail = React.lazy(() => import('@/pages/admin/ApplicantDetail'));
 
+import { getSafeStoredUser } from '@/lib/session';
+export { getSafeStoredUser };
+
 /* ---- Auth Guards ---- */
 function RequireAuth({ role }) {
-  let user = JSON.parse(localStorage.getItem('user') || 'null');
+  const user = getSafeStoredUser();
   const token = localStorage.getItem('token');
-
-  // Handle nested data wrapper from old sessions
-  if (user && user.data && !user.role) {
-    user = user.data;
-  }
 
   // If session is completely invalid or missing role, force logout
   if (!token || !user || !user.role) {
@@ -74,12 +72,7 @@ function RequireAuth({ role }) {
  * Shows a loading spinner while checking.
  */
 function RequireInitialProfile() {
-  const storedUser = (() => {
-    try {
-      const u = JSON.parse(localStorage.getItem('user') || '{}');
-      return u.data || u;
-    } catch { return {}; }
-  })();
+  const storedUser = getSafeStoredUser() || {};
 
   const initiallyComplete = Boolean(
     storedUser?.is_profile_complete ||

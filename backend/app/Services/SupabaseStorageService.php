@@ -13,11 +13,21 @@ class SupabaseStorageService
     protected string $tempBucket;
     /** @var bool|string */
     protected $verifySsl;
+    protected string $driver;
+    protected string $localStoragePath;
 
     public function __construct()
     {
-        $this->baseUrl = rtrim(config('services.supabase.url', env('SUPABASE_URL')), '/');
-        $this->serviceKey = config('services.supabase.service_key', env('SUPABASE_SERVICE_KEY'));
+        $this->driver = config('services.supabase.driver', env('SUPABASE_STORAGE_DRIVER', 'supabase'));
+
+        // Pre-commit safety gate: Production environments must strictly reject local/mock drivers
+        if (app()->environment('production') && in_array($this->driver, ['local', 'mock'], true)) {
+            throw new \DomainException("Local/mock Supabase storage driver is strictly prohibited in production environments.");
+        }
+
+        $this->localStoragePath = storage_path('app/mock_supabase');
+        $this->baseUrl = rtrim((string) config('services.supabase.url', env('SUPABASE_URL', '')), '/');
+        $this->serviceKey = (string) config('services.supabase.service_key', env('SUPABASE_SERVICE_KEY', ''));
         $this->defaultBucket = config('services.supabase.bucket', env('AWS_BUCKET', 'solo-parent-documents'));
         $this->tempBucket = config('services.supabase.temp_bucket', env('SUPABASE_TEMP_BUCKET', 'solo-parent-temp'));
         
@@ -27,6 +37,45 @@ class SupabaseStorageService
             $this->verifySsl = $caBundle;
         } else {
             $this->verifySsl = (bool) $sslVerify;
+        }
+    }
+
+    /**
+     * Resolve and validate a local mock storage path, strictly preventing directory traversal.
+     *
+     * @param string $bucket
+     * @param string $path
+     * @return string Absolute file path within localStoragePath
+     * @throws \InvalidArgumentException
+     */
+    protected function resolveLocalPath(string $bucket, string $path): string
+    {
+        if (!preg_match('/^[a-zA-Z0-9_\-\.]+$/', $bucket)) {
+            throw new \InvalidArgumentException("Invalid storage bucket name: {$bucket}");
+        }
+
+        // Sanitize path: normalize slashes, eliminate leading slashes, reject directory traversal
+        $cleanPath = ltrim(str_replace('\\', '/', $path), '/');
+        $segments = explode('/', $cleanPath);
+        foreach ($segments as $segment) {
+            if ($segment === '..' || $segment === '.') {
+                throw new \InvalidArgumentException("Directory traversal detected in storage path: {$path}");
+            }
+        }
+
+        $baseDir = rtrim(str_replace('\\', '/', $this->localStoragePath), '/');
+        return $baseDir . '/' . $bucket . '/' . $cleanPath;
+    }
+
+    /**
+     * Ensure Supabase credentials exist before initiating live HTTP calls.
+     *
+     * @throws \RuntimeException
+     */
+    protected function ensureLiveConfigured(): void
+    {
+        if (empty($this->baseUrl) || empty($this->serviceKey)) {
+            throw new \RuntimeException("Supabase storage is unconfigured: missing SUPABASE_URL or SUPABASE_SERVICE_KEY.");
         }
     }
 
@@ -43,6 +92,23 @@ class SupabaseStorageService
     public function upload(string $path, string $contents, string $mimeType, ?string $bucket = null): array
     {
         $bucket = $bucket ?? $this->defaultBucket;
+
+        if ($this->driver === 'local' || $this->driver === 'mock') {
+            $fullPath = $this->resolveLocalPath($bucket, $path);
+            $dir = dirname($fullPath);
+            if (!is_dir($dir)) {
+                mkdir($dir, 0750, true);
+            }
+            file_put_contents($fullPath, $contents);
+            @chmod($fullPath, 0600);
+            return [
+                'path'   => $path,
+                'bucket' => $bucket,
+            ];
+        }
+
+        $this->ensureLiveConfigured();
+
         $encodedBucket = rawurlencode($bucket);
         $encodedPath = implode('/', array_map('rawurlencode', explode('/', $path)));
         $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}/{$encodedPath}";
@@ -85,6 +151,16 @@ class SupabaseStorageService
     public function getSignedUrl(string $path, int $expiresIn = 900, ?string $bucket = null): string
     {
         $bucket = $bucket ?? $this->defaultBucket;
+
+        if ($this->driver === 'local' || $this->driver === 'mock') {
+            $this->resolveLocalPath($bucket, $path);
+            $encodedBucket = rawurlencode($bucket);
+            $cleanPath = ltrim(str_replace('\\', '/', $path), '/');
+            return url("/storage/mock/{$encodedBucket}/{$cleanPath}?token=mock_signature&expires=" . (time() + $expiresIn));
+        }
+
+        $this->ensureLiveConfigured();
+
         $encodedBucket = rawurlencode($bucket);
         // Pass path directly without rawurlencoding commas/symbols which break Supabase signature verification
         $cleanPath = ltrim($path, '/');
@@ -129,6 +205,17 @@ class SupabaseStorageService
     public function download(string $path, ?string $bucket = null): string
     {
         $bucket = $bucket ?? $this->defaultBucket;
+
+        if ($this->driver === 'local' || $this->driver === 'mock') {
+            $fullPath = $this->resolveLocalPath($bucket, $path);
+            if (!file_exists($fullPath)) {
+                throw new \RuntimeException("Local mock file not found: {$path}");
+            }
+            return (string) file_get_contents($fullPath);
+        }
+
+        $this->ensureLiveConfigured();
+
         $encodedBucket = rawurlencode($bucket);
         $cleanPath = ltrim($path, '/');
         $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}/" . str_replace(' ', '%20', $cleanPath);
@@ -158,6 +245,22 @@ class SupabaseStorageService
     public function move(string $fromPath, string $toPath, ?string $bucket = null): bool
     {
         $bucket = $bucket ?? $this->defaultBucket;
+
+        if ($this->driver === 'local' || $this->driver === 'mock') {
+            $fromFullPath = $this->resolveLocalPath($bucket, $fromPath);
+            $toFullPath = $this->resolveLocalPath($bucket, $toPath);
+            if (!file_exists($fromFullPath)) {
+                throw new \RuntimeException("Local mock source file not found: {$fromPath}");
+            }
+            $targetDir = dirname($toFullPath);
+            if (!is_dir($targetDir)) {
+                mkdir($targetDir, 0750, true);
+            }
+            return rename($fromFullPath, $toFullPath);
+        }
+
+        $this->ensureLiveConfigured();
+
         $url = "{$this->baseUrl}/storage/v1/object/move";
 
         $response = Http::withOptions(['verify' => $this->verifySsl])
@@ -194,6 +297,17 @@ class SupabaseStorageService
     public function delete(string $path, ?string $bucket = null): bool
     {
         $bucket = $bucket ?? $this->defaultBucket;
+
+        if ($this->driver === 'local' || $this->driver === 'mock') {
+            $fullPath = $this->resolveLocalPath($bucket, $path);
+            if (file_exists($fullPath)) {
+                @unlink($fullPath);
+            }
+            return true;
+        }
+
+        $this->ensureLiveConfigured();
+
         $encodedBucket = rawurlencode($bucket);
         $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}";
 

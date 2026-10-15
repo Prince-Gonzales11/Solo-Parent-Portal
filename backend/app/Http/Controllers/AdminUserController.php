@@ -32,6 +32,7 @@ class AdminUserController extends Controller
             $query->where(function ($q) use ($s, $likeOp) {
                 $q->where('full_name', $likeOp, "%{$s}%")
                   ->orWhere('email', $likeOp, "%{$s}%")
+                  ->orWhere('phone_number', $likeOp, "%{$s}%")
                   ->orWhereHas('profile', function ($pq) use ($s, $likeOp) {
                       $pq->whereHas('barangay', function ($bq) use ($s, $likeOp) {
                           $bq->where('name', $likeOp, "%{$s}%");
@@ -204,51 +205,153 @@ class AdminUserController extends Controller
     {
         $actor = $request->user();
 
+        // 1. Role validation
         $request->validate([
-            'full_name' => 'required|string|max:200',
-            'email'     => 'required|email|unique:users,email',
-            'role'      => 'required|in:applicant,admin,super_admin',
-            'password'  => 'required|string|min:8',
+            'role' => 'required|in:applicant,admin,super_admin',
         ]);
 
+        $role = $request->role;
+
         // QA-P1-12: Only super administrators can create staff or administrator accounts
-        if (in_array($request->role, ['admin', 'super_admin']) && (!$actor || $actor->role !== 'super_admin')) {
+        if (in_array($role, ['admin', 'super_admin']) && (!$actor || $actor->role !== 'super_admin')) {
             return response()->json([
                 'detail' => 'Unauthorized. Only super administrators can create staff or administrator accounts.',
             ], 403);
         }
 
+        $normalizedPhone = null;
+
+        // 2. Role-specific validation rules
+        if ($role === 'applicant') {
+            $rules = [
+                'full_name'            => 'required|string|max:200',
+                'password'             => 'required|string|min:8|max:128',
+                'dpa_consent_attested' => 'sometimes|accepted',
+            ];
+
+            $email = trim((string) $request->input('email', ''));
+            $phone = trim((string) $request->input('phone_number', ''));
+
+            if (empty($email) && empty($phone)) {
+                return response()->json([
+                    'message' => 'Please provide either an email address or a valid Philippine mobile number.',
+                    'errors' => [
+                        'identifier' => ['Please provide either an email address or a valid Philippine mobile number.'],
+                    ],
+                ], 422);
+            }
+
+            if (!empty($email)) {
+                $rules['email'] = 'email|max:255|unique:users,email';
+            }
+
+            if (!empty($phone)) {
+                if (!$this->isPhilippineMobile($phone)) {
+                    return response()->json([
+                        'message' => 'The mobile number must be a valid Philippine mobile number (e.g. 09171234567 or +639171234567).',
+                        'errors' => [
+                            'phone_number' => ['The mobile number must be a valid Philippine mobile number.'],
+                        ],
+                    ], 422);
+                }
+                $normalizedPhone = $this->normalizePhilippineMobile($phone);
+
+                $phoneQuery = User::where('phone_number', $normalizedPhone);
+                if (str_starts_with($normalizedPhone, '+63')) {
+                    $phoneQuery->orWhere('phone_number', '0' . substr($normalizedPhone, 3))
+                               ->orWhere('phone_number', substr($normalizedPhone, 1));
+                }
+                if ($phoneQuery->exists()) {
+                    return response()->json([
+                        'message' => 'An account with this mobile number already exists.',
+                        'errors' => [
+                            'phone_number' => ['An account with this mobile number already exists.'],
+                        ],
+                    ], 422);
+                }
+            }
+
+            $request->validate($rules);
+        } else {
+            // Staff accounts (admin, super_admin) must have a valid official email
+            $request->validate([
+                'full_name' => 'required|string|max:200',
+                'email'     => 'required|email|max:255|unique:users,email',
+                'password'  => 'required|string|min:8|max:128',
+            ]);
+        }
+
+        $consentAttested = $role === 'applicant' ? $request->boolean('dpa_consent_attested') : true;
+
         $user = User::create([
-            'full_name'         => $request->full_name,
-            'email'             => $request->email,
-            'role'              => $request->role,
+            'full_name'         => trim($request->full_name),
+            'email'             => !empty($request->email) ? strtolower(trim($request->email)) : null,
+            'phone_number'      => $normalizedPhone,
+            'role'              => $role,
             'password_hash'     => Hash::make($request->password),
             'auth_provider'     => 'local',
             'is_active'         => true,
-            'email_verified_at' => now(),
-            'dpa_consent'       => true,
-            'dpa_consented_at'  => now(),
-            'dpa_consent_ip'    => $request->ip(),
+            'email_verified_at' => $role === 'applicant' ? null : now(),
+            'dpa_consent'       => $consentAttested,
+            'dpa_consented_at'  => $consentAttested ? now() : null,
+            'dpa_consent_ip'    => null, // Caseworker IP must not be recorded as applicant's IP
         ]);
 
-        // QA-P1-12: Provision applicant profile if created role is applicant
+        // Provision applicant profile if created role is applicant
         if ($user->role === 'applicant') {
             $parts = explode(' ', trim($request->full_name), 2);
             \App\Models\ApplicantProfile::firstOrCreate(
                 ['user_id' => $user->id],
                 [
-                    'first_name' => $parts[0] ?? $request->full_name,
-                    'last_name'  => $parts[1] ?? '',
+                    'first_name'     => $parts[0] ?? $request->full_name,
+                    'last_name'      => $parts[1] ?? '',
+                    'contact_number' => $normalizedPhone,
                 ]
             );
         }
 
         AuditLog::record($request, 'user.created', 'User', $user->id, [
-            'email'      => $user->email,
-            'role'       => $user->role,
-            'created_by' => $actor->email,
+            'email'                => $user->email,
+            'phone_number'         => $user->phone_number,
+            'role'                 => $user->role,
+            'created_by'           => $actor->email,
+            'dpa_consent_channel'  => $role === 'applicant' ? ($consentAttested ? 'in_person_walkin' : null) : null,
+            'dpa_consent_attested' => $role === 'applicant' ? $consentAttested : null,
+            'attested_by_admin_id' => ($role === 'applicant' && $consentAttested) ? $actor->id : null,
+            'caseworker_ip'        => $request->ip(),
         ]);
 
         return response()->json($user, 201);
+    }
+
+    /**
+     * Check if a given string is a valid Philippine mobile number.
+     * Supports formats: 09XXXXXXXXX, +639XXXXXXXXX, 639XXXXXXXXX, 9XXXXXXXXX
+     */
+    private function isPhilippineMobile(string $value): bool
+    {
+        $cleaned = preg_replace('/[\s\-]/', '', $value);
+        return (bool) preg_match('/^(\+?63|0)?9\d{9}$/', $cleaned);
+    }
+
+    /**
+     * Normalize Philippine mobile number to +639XXXXXXXXX
+     */
+    private function normalizePhilippineMobile(string $value): string
+    {
+        $cleaned = preg_replace('/[\s\-]/', '', $value);
+        if (str_starts_with($cleaned, '09')) {
+            return '+63' . substr($cleaned, 1);
+        }
+        if (str_starts_with($cleaned, '639')) {
+            return '+' . $cleaned;
+        }
+        if (str_starts_with($cleaned, '+639')) {
+            return $cleaned;
+        }
+        if (str_starts_with($cleaned, '9') && strlen($cleaned) === 10) {
+            return '+63' . $cleaned;
+        }
+        return $cleaned;
     }
 }

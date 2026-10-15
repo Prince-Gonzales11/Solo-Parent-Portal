@@ -18,6 +18,8 @@ import {
   KeyRound, Pencil, ChevronLeft, ChevronRight, CheckCircle, AlertCircle, FileText, MapPin
 } from 'lucide-react';
 
+import { getSafeStoredUser } from '@/App';
+
 const ROLE_CONFIG = {
   applicant:   { label: 'Applicant',   color: 'bg-info-soft text-info dark:bg-info-soft dark:text-info' },
   admin:       { label: 'Admin',        color: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' },
@@ -34,6 +36,9 @@ function RoleBadge({ role }) {
 }
 
 export default function AdminUsers() {
+  const currentUser = getSafeStoredUser();
+  const isSuperAdmin = currentUser?.role === 'super_admin';
+
   const [users, setUsers]               = useState([]);
   const [meta, setMeta]                 = useState({ current_page: 1, last_page: 1, total: 0 });
   const [loading, setLoading]           = useState(true);
@@ -48,8 +53,16 @@ export default function AdminUsers() {
   const [tempPassword, setTempPassword] = useState(null);
   const [saving, setSaving]             = useState(false);
 
-  // Create admin form
-  const [form, setForm] = useState({ full_name: '', email: '', role: 'admin', password: '' });
+  // Create user form
+  const initialFormState = {
+    full_name: '',
+    email: '',
+    phone_number: '',
+    role: 'applicant',
+    password: '',
+    dpa_consent_attested: false,
+  };
+  const [form, setForm] = useState(initialFormState);
 
   const load = async (pg = page) => {
     setLoading(true);
@@ -110,16 +123,52 @@ export default function AdminUsers() {
   };
 
   const handleCreate = async () => {
-    if (!form.full_name || !form.email || !form.password) {
-      toast.error('All fields are required.');
+    if (!form.full_name?.trim()) {
+      toast.error('Full Name is required.');
       return;
     }
+    if (form.role === 'applicant') {
+      const emailTrimmed = form.email?.trim();
+      const phoneTrimmed = form.phone_number?.trim();
+      if (!emailTrimmed && !phoneTrimmed) {
+        toast.error('Please provide either an email address or a valid Philippine mobile number.');
+        return;
+      }
+      if (phoneTrimmed && !/^(\+?63|0)?9\d{9}$/.test(phoneTrimmed.replace(/[\s\-]/g, ''))) {
+        toast.error('Please enter a valid Philippine mobile number (e.g., 09171234567 or +639171234567).');
+        return;
+      }
+      if (!form.dpa_consent_attested) {
+        toast.error("You must attest that the applicant provided physical Data Privacy Act consent.");
+        return;
+      }
+    } else {
+      if (!form.email?.trim()) {
+        toast.error('Email address is required for staff accounts.');
+        return;
+      }
+    }
+    if (!form.password || form.password.length < 8) {
+      toast.error('Temporary password must be at least 8 characters.');
+      return;
+    }
+
     setSaving(true);
     try {
-      await api.post('/admin/users', form);
-      toast.success('Admin account created successfully.');
+      await api.post('/admin/users', {
+        full_name: form.full_name.trim(),
+        email: form.email?.trim() || null,
+        phone_number: form.phone_number?.trim() || null,
+        role: isSuperAdmin ? form.role : 'applicant',
+        password: form.password,
+        dpa_consent_attested: form.role === 'applicant' ? Boolean(form.dpa_consent_attested) : undefined,
+      });
+
+      const roleLabels = { applicant: 'Applicant', admin: 'Admin', super_admin: 'Super Admin' };
+      const createdRole = isSuperAdmin ? form.role : 'applicant';
+      toast.success(`${roleLabels[createdRole] || 'User'} account created successfully.`);
       setCreateOpen(false);
-      setForm({ full_name: '', email: '', role: 'admin', password: '' });
+      setForm(initialFormState);
       load(page);
     } catch (err) {
       toastError(err, 'Failed to create account.');
@@ -190,7 +239,9 @@ export default function AdminUsers() {
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <p className="font-bold text-sm text-foreground truncate">{u.full_name}</p>
-                <p className="text-xs text-muted-foreground truncate">{u.email}</p>
+                <p className="text-xs text-muted-foreground truncate">
+                  {u.email ? (u.phone_number ? `${u.email} • ${u.phone_number}` : u.email) : (u.phone_number || '—')}
+                </p>
               </div>
               <RoleBadge role={u.role} />
             </div>
@@ -226,10 +277,12 @@ export default function AdminUsers() {
             </div>
 
             <div className="pt-2 border-t border-border/60 flex flex-wrap items-center justify-end gap-2">
-              <Button size="sm" variant="outline" className="min-h-[40px] px-3 text-xs gap-1.5 flex-1 sm:flex-initial justify-center"
-                onClick={() => setRoleDialog({ user: u, newRole: u.role })}>
-                <Shield className="h-3.5 w-3.5" /> Role
-              </Button>
+              {isSuperAdmin && (
+                <Button size="sm" variant="outline" className="min-h-[40px] px-3 text-xs gap-1.5 flex-1 sm:flex-initial justify-center"
+                  onClick={() => setRoleDialog({ user: u, newRole: u.role })}>
+                  <Shield className="h-3.5 w-3.5" /> Role
+                </Button>
+              )}
               <Button size="sm" variant="outline" className="min-h-[40px] px-3 text-xs gap-1.5 flex-1 sm:flex-initial justify-center"
                 onClick={() => setResetDialog({ user: u })}>
                 <KeyRound className="h-3.5 w-3.5" /> Reset Pwd
@@ -271,7 +324,9 @@ export default function AdminUsers() {
                 <TableCell>
                   <div>
                     <p className="font-medium text-sm">{u.full_name}</p>
-                    <p className="text-xs text-muted-foreground">{u.email}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {u.email ? (u.phone_number ? `${u.email} • ${u.phone_number}` : u.email) : (u.phone_number || '—')}
+                    </p>
                   </div>
                 </TableCell>
                 <TableCell className="hidden md:table-cell">
@@ -302,10 +357,12 @@ export default function AdminUsers() {
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-1">
-                    <Button size="sm" variant="ghost" title="Change Role" className="h-9 w-9 min-h-[36px] min-w-[36px]"
-                      onClick={() => setRoleDialog({ user: u, newRole: u.role })}>
-                      <Shield className="h-4 w-4" />
-                    </Button>
+                    {isSuperAdmin && (
+                      <Button size="sm" variant="ghost" title="Change Role" className="h-9 w-9 min-h-[36px] min-w-[36px]"
+                        onClick={() => setRoleDialog({ user: u, newRole: u.role })}>
+                        <Shield className="h-4 w-4" />
+                      </Button>
+                    )}
                     <Button size="sm" variant="ghost" title="Reset Password" className="h-9 w-9 min-h-[36px] min-w-[36px]"
                       onClick={() => setResetDialog({ user: u })}>
                       <KeyRound className="h-4 w-4" />
@@ -339,33 +396,115 @@ export default function AdminUsers() {
         </div>
       )}
 
-      {/* Create Admin Dialog */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md">
+      {/* Create User Dialog */}
+      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) setForm(initialFormState); }}>
+        <DialogContent className="max-w-md w-full sm:max-w-lg p-4 sm:p-6 max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Create User Account</DialogTitle>
-            <DialogDescription>Create a new CSWDD staff or applicant account.</DialogDescription>
+            <DialogTitle>Create User Account / Walk-In</DialogTitle>
+            <DialogDescription>
+              {isSuperAdmin
+                ? 'Create a new CSWDD staff or walk-in applicant account.'
+                : 'Register a new walk-in solo parent applicant account.'}
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
-            <div className="space-y-2"><Label>Full Name</Label>
-              <Input value={form.full_name} onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))} placeholder="e.g. Maria Santos" /></div>
-            <div className="space-y-2"><Label>Email Address</Label>
-              <Input type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} placeholder="user@cswdd.gov.ph" /></div>
-            <div className="space-y-2"><Label>Role</Label>
-              <Select value={form.role} onValueChange={v => setForm(f => ({ ...f, role: v }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="admin">Admin</SelectItem>
-                  <SelectItem value="super_admin">Super Admin</SelectItem>
-                  <SelectItem value="applicant">Applicant</SelectItem>
-                </SelectContent>
-              </Select>
+            <div className="space-y-1.5">
+              <Label>Full Name <span className="text-destructive">*</span></Label>
+              <Input
+                value={form.full_name}
+                onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))}
+                placeholder="e.g. Maria Santos"
+              />
             </div>
-            <div className="space-y-2"><Label>Temporary Password</Label>
-              <Input type="password" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} placeholder="Min. 8 characters" /></div>
+
+            <div className="space-y-1.5">
+              <Label>
+                Email Address{' '}
+                {form.role === 'applicant' ? (
+                  <span className="text-muted-foreground text-xs font-normal">(Optional if mobile number provided)</span>
+                ) : (
+                  <span className="text-destructive">*</span>
+                )}
+              </Label>
+              <Input
+                type="email"
+                value={form.email}
+                onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+                placeholder="applicant@example.com"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>
+                Mobile Number{' '}
+                <span className="text-muted-foreground text-xs font-normal">
+                  {form.role === 'applicant' ? '(Optional if email provided — e.g. 09171234567)' : '(Optional)'}
+                </span>
+              </Label>
+              <Input
+                type="tel"
+                value={form.phone_number}
+                onChange={e => setForm(f => ({ ...f, phone_number: e.target.value }))}
+                placeholder="09XXXXXXXXX or +639XXXXXXXXX"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Account Role</Label>
+              {isSuperAdmin ? (
+                <Select value={form.role} onValueChange={v => setForm(f => ({ ...f, role: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="applicant">Applicant (Citizen Walk-in)</SelectItem>
+                    <SelectItem value="admin">Admin (Caseworker)</SelectItem>
+                    <SelectItem value="super_admin">Super Admin</SelectItem>
+                  </SelectContent>
+                </Select>
+              ) : (
+                <div className="flex items-center justify-between p-2.5 rounded-md border bg-muted/40 text-sm">
+                  <div className="flex items-center gap-2">
+                    <RoleBadge role="applicant" />
+                    <span className="text-xs text-muted-foreground font-medium">Applicant (Citizen Walk-in)</span>
+                  </div>
+                  <span className="text-[11px] text-muted-foreground">Admin Caseworker</span>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Temporary Password <span className="text-destructive">*</span></Label>
+              <Input
+                type="password"
+                value={form.password}
+                onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+                placeholder="Min. 8 characters"
+              />
+            </div>
+
+            {form.role === 'applicant' && (
+              <div className="p-3 bg-muted/40 rounded-lg border border-border/80 space-y-2">
+                <label className="flex items-start gap-2.5 cursor-pointer text-xs leading-relaxed text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={form.dpa_consent_attested}
+                    onChange={e => setForm(f => ({ ...f, dpa_consent_attested: e.target.checked }))}
+                    className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary shrink-0"
+                  />
+                  <span>
+                    <strong>Caseworker Attestation (Data Privacy Act):</strong> I certify that this applicant appeared in person, was provided the official CSWDD Data Privacy Notice, and has physically signed the consent form.
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
-          <DialogFooter className="flex-col-reverse sm:flex-row gap-2 sm:gap-0">
-            <Button variant="outline" onClick={() => setCreateOpen(false)} className="w-full sm:w-auto">Cancel</Button>
+          <DialogFooter className="flex-col-reverse sm:flex-row gap-2 sm:gap-0 pt-2">
+            <Button
+              variant="outline"
+              onClick={() => { setCreateOpen(false); setForm(initialFormState); }}
+              className="w-full sm:w-auto"
+            >
+              Cancel
+            </Button>
             <Button onClick={handleCreate} disabled={saving} className="w-full sm:w-auto">
               {saving ? <><RefreshCw className="mr-2 h-4 w-4 animate-spin" />Creating…</> : 'Create Account'}
             </Button>
