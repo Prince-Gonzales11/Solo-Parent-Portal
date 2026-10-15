@@ -1,0 +1,345 @@
+[
+    {
+        "name": "Public: landing-data",
+        "passed": true,
+        "status": 200,
+        "message": "Status 200",
+        "details": null
+    },
+    {
+        "name": "Public: categories",
+        "passed": true,
+        "status": 200,
+        "message": "Found 15 categories",
+        "details": null
+    },
+    {
+        "name": "Public: barangays",
+        "passed": true,
+        "status": 200,
+        "message": "Found 86 barangays",
+        "details": null
+    },
+    {
+        "name": "Public: faqs",
+        "passed": true,
+        "status": 200,
+        "message": "Status 200",
+        "details": null
+    },
+    {
+        "name": "Public: benefits",
+        "passed": true,
+        "status": 200,
+        "message": "Status 200",
+        "details": null
+    },
+    {
+        "name": "Auth: Login Invalid Credentials",
+        "passed": true,
+        "status": 422,
+        "message": "Correctly rejected invalid credentials",
+        "details": null
+    },
+    {
+        "name": "Auth: Login Applicant",
+        "passed": true,
+        "status": 200,
+        "message": "Authenticated as Maria Santos Dela Cruz",
+        "details": null
+    },
+    {
+        "name": "Auth: Login Super Admin",
+        "passed": true,
+        "status": 200,
+        "message": "Authenticated as Super Admin",
+        "details": null
+    },
+    {
+        "name": "Auth: GET \/auth\/me for Applicant",
+        "passed": true,
+        "status": 200,
+        "message": "Role: applicant",
+        "details": null
+    },
+    {
+        "name": "Auth: GET \/auth\/me for Admin",
+        "passed": true,
+        "status": 200,
+        "message": "Role: super_admin",
+        "details": null
+    },
+    {
+        "name": "Profile: GET \/profile",
+        "passed": true,
+        "status": 200,
+        "message": "Name: Maria Dela Cruz",
+        "details": null
+    },
+    {
+        "name": "Profile: GET \/profile\/initial-status",
+        "passed": true,
+        "status": 200,
+        "message": "Complete: true",
+        "details": null
+    },
+    {
+        "name": "Profile: PUT \/profile (Update Contact\/Address)",
+        "passed": true,
+        "status": 200,
+        "message": "Profile updated successfully",
+        "details": null
+    },
+    {
+        "name": "Portal: GET \/portal\/dashboard-summary",
+        "passed": true,
+        "status": 200,
+        "message": "Status 200",
+        "details": null
+    },
+    {
+        "name": "Notifications: GET \/notifications",
+        "passed": true,
+        "status": 200,
+        "message": "Status 200",
+        "details": null
+    },
+    {
+        "name": "Notifications: GET \/notifications\/unread-count",
+        "passed": true,
+        "status": 200,
+        "message": "Count: 2",
+        "details": null
+    },
+    {
+        "name": "Application: Fetch Category Requirements",
+        "passed": true,
+        "status": 200,
+        "message": "Category: a1 (Birth of a child as a consequence of rape), 7 required documents",
+        "details": null
+    },
+    {
+        "name": "Application: POST \/applications (Create \/ Update Draft)",
+        "passed": true,
+        "status": 200,
+        "message": "Application ID: 01a0fa88-58b8-727a-b35a-84c6bcd539e6, Ref: SP-202610-5BQ5SM",
+        "details": null
+    },
+    {
+        "name": "Application: GET \/applications\/me",
+        "passed": true,
+        "status": 200,
+        "message": "Found active application Ref: SP-202610-5BQ5SM",
+        "details": null
+    },
+    {
+        "name": "Document: Upload Document",
+        "passed": false,
+        "status": 409,
+        "message": "Upload failed: {\"detail\":\"A document for this requirement has already been uploaded. Please use the replace function if needed.\"}",
+        "details": null
+    },
+    {
+        "name": "Document: GET \/documents\/{id}\/view",
+        "passed": false,
+        "status": null,
+        "message": "No uploaded doc ID",
+        "details": null
+    },
+    {
+        "name": "Document: Upload Remaining Requirements",
+        "passed": true,
+        "status": 200,
+        "message": "Uploaded 0 additional required documents",
+        "details": null
+    },
+    {
+        "name": "Application: Check \/applications\/submission-check",
+        "passed": true,
+        "status": 200,
+        "message": "Ready: false, Missing docs: 0",
+        "details": null
+    },
+    {
+        "name": "Application: POST \/applications\/{id}\/submit (Commit Application)",
+        "passed": false,
+        "status": 422,
+        "message": "Submit response: {\"detail\":\"Submission incomplete. Please ensure all required fields and documents are completed.\"}",
+        "details": null
+    },
+    {
+        "name": "Messages: Applicant sends message",
+        "passed": true,
+        "status": 201,
+        "message": "Message sent successfully",
+        "details": null
+    },
+    {
+        "name": "Messages: GET \/messages for Applicant",
+        "passed": true,
+        "status": 200,
+        "message": "Messages retrieved",
+        "details": null
+    },
+    {
+        "name": "Messages: GET \/messages\/unread-count",
+        "passed": true,
+        "status": 200,
+        "message": "Unread messages: 0",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/applications",
+        "passed": true,
+        "status": 200,
+        "message": "Found 1 applications in registry",
+        "details": null
+    },
+    {
+        "name": "Admin: Filter Applications by Type (?type=new)",
+        "passed": true,
+        "status": 200,
+        "message": "Filter works",
+        "details": null
+    },
+    {
+        "name": "Admin: Filter Applications by Type (?type=renewal)",
+        "passed": true,
+        "status": 200,
+        "message": "Filter works",
+        "details": null
+    },
+    {
+        "name": "Admin: Filter Applications by Type (?type=loss_spic)",
+        "passed": true,
+        "status": 200,
+        "message": "Filter works",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/applications\/{id}",
+        "passed": true,
+        "status": 200,
+        "message": "Retrieved application details: SP-202610-5BQ5SM",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/applications\/{appId}\/documents",
+        "passed": false,
+        "status": 500,
+        "message": "Found 5 attached documents",
+        "details": null
+    },
+    {
+        "name": "Admin: Approve All Documents for Application",
+        "passed": true,
+        "status": 200,
+        "message": "Successfully approved 7 documents. Applicant qualified for application form.",
+        "details": null
+    },
+    {
+        "name": "Admin: Advance Application Status to Approved",
+        "passed": false,
+        "status": 422,
+        "message": "Status transitioned to approved: ",
+        "details": null
+    },
+    {
+        "name": "Admin: Generate ID Card PDF",
+        "passed": true,
+        "status": 200,
+        "message": "PDF ID card generated successfully (148817 bytes)",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/categories",
+        "passed": true,
+        "status": 200,
+        "message": "Categories count: 17",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/barangays",
+        "passed": true,
+        "status": 200,
+        "message": "Barangays count: 86",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/users",
+        "passed": true,
+        "status": 200,
+        "message": "Users count: 3",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/announcements",
+        "passed": true,
+        "status": 200,
+        "message": "Announcements count: 0",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/resources",
+        "passed": true,
+        "status": 200,
+        "message": "Resources count: 0",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/audit-logs",
+        "passed": true,
+        "status": 200,
+        "message": "Audit logs count: 32",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/analytics\/overview",
+        "passed": true,
+        "status": 200,
+        "message": "Overview retrieved",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/analytics\/demographics",
+        "passed": true,
+        "status": 200,
+        "message": "Demographics retrieved",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/analytics\/trends",
+        "passed": true,
+        "status": 200,
+        "message": "Trends retrieved",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/reports\/export.csv",
+        "passed": true,
+        "status": 200,
+        "message": "CSV report exported (311 bytes)",
+        "details": null
+    },
+    {
+        "name": "Admin: GET \/admin\/messages",
+        "passed": true,
+        "status": 200,
+        "message": "Admin messages retrieved",
+        "details": null
+    },
+    {
+        "name": "Application: Renewal Submission (POST \/applications\/renew)",
+        "passed": false,
+        "status": 409,
+        "message": "Renewal response: {\"detail\":\"You already have an active application in progress.\"}",
+        "details": null
+    },
+    {
+        "name": "Application: Loss of SPIC Submission (POST \/applications\/loss-spic)",
+        "passed": false,
+        "status": 409,
+        "message": "Loss of SPIC response: {\"detail\":\"You already have an active application in progress.\"}",
+        "details": null
+    }
+]

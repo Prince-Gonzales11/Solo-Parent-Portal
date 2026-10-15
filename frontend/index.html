@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/gif" href="/images/seal.gif" />
+    <link rel="apple-touch-icon" href="/images/seal.gif" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
+    <title>Solo Parent Portal</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap" rel="stylesheet" />
+    <style>
+      #splash-screen {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background-color: #ffffff;
+        z-index: 9999;
+        font-family: 'Roboto', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        padding: 1.5rem;
+        transition: opacity 0.4s ease, visibility 0.4s ease;
+      }
+      .splash-content {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        animation: splashEntrance 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+      }
+      .splash-logos {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 2.25rem;
+        margin-bottom: 0.5rem;
+      }
+      .splash-logo {
+        width: 180px;
+        height: 180px;
+        transition: transform 0.3s ease;
+      }
+      .splash-logo.seal {
+        object-fit: contain;
+        filter: drop-shadow(0 14px 28px rgba(0, 0, 0, 0.09));
+      }
+      .splash-logo.cswdd {
+        border-radius: 50%;
+        object-fit: cover;
+        background-color: #ffffff;
+        border: 4px solid #f8fafc;
+        box-shadow: 0 14px 28px rgba(0, 0, 0, 0.09);
+      }
+      .splash-title {
+        color: #000000;
+        font-weight: 700;
+        font-size: 2.25rem;
+        letter-spacing: -0.02em;
+        margin: 1.25rem 0 0.35rem 0;
+        text-align: center;
+        line-height: 1.2;
+      }
+      .splash-subtitle {
+        color: #4b5563;
+        font-size: 0.875rem;
+        font-weight: 600;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        margin: 0 0 1.75rem 0;
+        text-align: center;
+      }
+      .splash-bar {
+        width: 130px;
+        height: 3px;
+        background-color: #e5e7eb;
+        border-radius: 9999px;
+        overflow: hidden;
+        position: relative;
+      }
+      .splash-progress {
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 45%;
+        background: #0e4b65;
+        border-radius: 9999px;
+        animation: splashProgress 1.2s ease-in-out infinite;
+      }
+      @keyframes splashProgress {
+        0% { left: -45%; }
+        100% { left: 100%; }
+      }
+      @keyframes splashEntrance {
+        from {
+          opacity: 0;
+          transform: scale(0.95);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+      @media (max-width: 640px) {
+        .splash-logos {
+          gap: 1.25rem;
+        }
+        .splash-logo {
+          width: 125px;
+          height: 125px;
+        }
+        .splash-title {
+          font-size: 1.65rem;
+          margin-top: 1rem;
+        }
+        .splash-subtitle {
+          font-size: 0.75rem;
+          letter-spacing: 0.22em;
+          margin-bottom: 1.25rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 1.2s Brand Splash Screen -->
+    <div id="splash-screen">
+      <div class="splash-content">
+        <div class="splash-logos">
+          <img src="/images/seal.gif" alt="City of Butuan Seal" class="splash-logo seal" />
+          <img src="/images/cswdd.jpg" alt="CSWDD Logo" class="splash-logo cswdd" />
+        </div>
+        <h1 class="splash-title">Solo Parent Portal</h1>
+        <p class="splash-subtitle">CITY OF BUTUAN</p>
+        <div class="splash-bar">
+          <div class="splash-progress"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="root"></div>
+
+    <script>
+      (function() {
+        var startTime = performance.now();
+        function dismissSplash() {
+          var elapsed = performance.now() - startTime;
+          var remaining = Math.max(0, 1200 - elapsed);
+          setTimeout(function() {
+            var splash = document.getElementById('splash-screen');
+            if (splash) {
+              splash.style.opacity = '0';
+              splash.style.pointerEvents = 'none';
+              setTimeout(function() {
+                if (splash && splash.parentNode) {
+                  splash.parentNode.removeChild(splash);
+                }
+              }, 400);
+            }
+          }, remaining);
+        }
+
+        if (document.readyState === 'complete') {
+          dismissSplash();
+        } else {
+          window.addEventListener('load', dismissSplash);
+        }
+        // Maximum fallback so splash never gets stuck
+        setTimeout(dismissSplash, 2500);
+      })();
+    </script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
