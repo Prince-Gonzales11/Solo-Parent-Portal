@@ -20,7 +20,7 @@ use Illuminate\Support\Facades\Schema;
 class CleanUserData extends Command
 {
     protected $signature = 'portal:clean-user-data
-                            {--connection= : Target database connection override}
+                            {--connection= : Target database connection override (strictly prohibited to prevent cross-database modifications)}
                             {--force : Force cleanup without confirmation}
                             {--disposable-marker= : Explicit disposable environment identity marker}';
 
@@ -29,24 +29,41 @@ class CleanUserData extends Command
     public const REQUIRED_DISPOSABLE_MARKER = 'solo_parent_disposable_verified_e2e';
     public const ALLOWED_PGSQL_DATABASE = 'solo_parent_disposable_e2e';
     public const ALLOWED_SQLITE_FILE = 'disposable_e2e.sqlite';
+    public const ALLOWED_DISPOSABLE_STORAGE_DIR = 'disposable_e2e_storage';
 
     public function handle(): int
     {
-        // 1. Environment Guard: Prohibit production and staging environments
+        // 1. Connection Override Prohibition Guard:
+        // Destructive operations execute against Laravel's default database connection.
+        // Allowing a --connection override risks validating one connection and deleting from another.
+        if ($this->hasOption('connection') && $this->option('connection')) {
+            $override = (string) $this->option('connection');
+            $defaultConn = (string) config('database.default', 'sqlite');
+            if ($override !== $defaultConn) {
+                $this->error("Safety violation: Connection mismatch detected. Connection override '{$override}' does not match active default connection '{$defaultConn}'. Destructive cleanup strictly refuses execution to prevent cross-database modifications.");
+                return 1;
+            }
+            $this->error("Safety violation: Connection override '--connection' is disabled. The active default database connection must directly be the verified disposable database.");
+            return 1;
+        }
+
+        $defaultConn = (string) config('database.default', 'sqlite');
+
+        // 2. Environment Guard: Prohibit production and staging environments
         $env = strtolower((string) app()->environment());
         if (in_array($env, ['production', 'staging'], true)) {
             $this->error("Safety violation: Destructive cleanup command 'portal:clean-user-data' is strictly prohibited in " . strtoupper($env) . " environment.");
             return 1;
         }
 
-        // 2. Storage Driver Guard: Must be strictly local or mock
+        // 3. Storage Driver Guard: Must be strictly local or mock
         $storage = app(\App\Services\SupabaseStorageService::class);
         if (!$storage->isLocalDriver()) {
             $this->error("Safety violation: Destructive cleanup is strictly prohibited against non-local storage driver '{$storage->getDriver()}'. Storage driver must be 'local' or 'mock'.");
             return 1;
         }
 
-        // 3. Shared Cache Backend Guard: Prohibit shared cache stores to prevent cross-app cache corruption
+        // 4. Shared Cache Backend Guard: Prohibit shared cache stores to prevent cross-app cache corruption
         $cacheStore = strtolower((string) config('cache.default', 'file'));
         $prohibitedCacheStores = ['redis', 'memcached', 'dynamodb'];
         if (in_array($cacheStore, $prohibitedCacheStores, true)) {
@@ -54,8 +71,7 @@ class CleanUserData extends Command
             return 1;
         }
 
-        // 4. Inspect effective Laravel database configuration (connection, overrides, DB_URL)
-        $defaultConn = (string) ($this->option('connection') ?: config('database.default', 'sqlite'));
+        // 5. Inspect effective Laravel default database configuration (connection, overrides, DB_URL)
         $connConfig = config("database.connections.{$defaultConn}", []);
         $rawDriver = strtolower((string) ($connConfig['driver'] ?? $defaultConn));
 
@@ -72,7 +88,7 @@ class CleanUserData extends Command
         $port = (int) ($parsedUrl['port'] ?? $connConfig['port'] ?? 0);
         $sslMode = strtolower((string) ($connConfig['sslmode'] ?? ''));
 
-        // 5. Host and Cloud/Remote Pattern Guard
+        // 6. Host and Cloud/Remote Pattern Guard
         $allowedLocalHosts = ['127.0.0.1', 'localhost', '::1', 'sqlite', ''];
         if (!in_array(strtolower($host), $allowedLocalHosts, true)) {
             $this->error("Safety violation: Destructive cleanup is strictly prohibited against non-local database host '{$host}'.");
@@ -92,14 +108,14 @@ class CleanUserData extends Command
             }
         }
 
-        // 6. Forwarded Remote Connection and Port/Tunnel Guard
+        // 7. Forwarded Remote Connection and Port/Tunnel Guard
         $isForwarded = !empty($connConfig['is_forwarded']) || !empty(env('DB_FORWARDED'));
         if ($port === 6543 || $isForwarded || in_array($sslMode, ['verify-full', 'verify-ca'], true)) {
             $this->error("Safety violation: Detected potentially forwarded or tunneled remote database configuration (port {$port}, sslmode '{$sslMode}'). Cannot reliably verify local isolation. Aborting.");
             return 1;
         }
 
-        // 7. Strict Database Driver and Name Allowlist
+        // 8. Strict Database Driver and Name Allowlist
         if ($rawDriver === 'pgsql' || $rawDriver === 'postgres') {
             // Explicitly reject primary local test database
             if ($database === 'solo_parent_local_test') {
@@ -131,21 +147,38 @@ class CleanUserData extends Command
                 return 1;
             }
         } elseif ($rawDriver === 'sqlite') {
-            // Prohibit arbitrary filenames. Only :memory: or exact database/disposable_e2e.sqlite
-            $approvedPath = database_path(self::ALLOWED_SQLITE_FILE);
-            $normDatabase = str_replace('\\', '/', $database);
-            $normApprovedPath = str_replace('\\', '/', $approvedPath);
-
             $isMemory = ($database === ':memory:');
-            $isApprovedFile = (
-                $normDatabase === $normApprovedPath ||
-                $normDatabase === self::ALLOWED_SQLITE_FILE ||
-                basename($normDatabase) === self::ALLOWED_SQLITE_FILE
-            );
 
-            if (!$isMemory && !$isApprovedFile) {
-                $this->error("Safety violation: SQLite database '{$database}' is not an approved disposable target. Only ':memory:' or exact 'database/" . self::ALLOWED_SQLITE_FILE . "' is permitted.");
-                return 1;
+            if (!$isMemory) {
+                // Reject empty database or lookalike filenames
+                if (empty($database) || basename($database) !== self::ALLOWED_SQLITE_FILE) {
+                    $this->error("Safety violation: SQLite database '{$database}' is not an approved disposable target. Only ':memory:' or exact canonical 'database/" . self::ALLOWED_SQLITE_FILE . "' is permitted.");
+                    return 1;
+                }
+
+                $approvedPath = database_path(self::ALLOWED_SQLITE_FILE);
+
+                // Reject symlinks
+                if (is_link($database) || (file_exists($approvedPath) && is_link($approvedPath))) {
+                    $this->error("Safety violation: Symlinks are strictly prohibited for disposable SQLite database target.");
+                    return 1;
+                }
+
+                // Canonical path resolution
+                $canonicalApprovedDir = realpath(database_path());
+                $canonicalDbDir = realpath(dirname($database));
+                $canonicalDb = realpath($database);
+                $canonicalApproved = realpath($approvedPath);
+
+                if ($canonicalApprovedDir === false || $canonicalDbDir === false || $canonicalDbDir !== $canonicalApprovedDir) {
+                    $this->error("Safety violation: SQLite database path '{$database}' does not resolve to the canonical approved path '{$approvedPath}'. Execution aborted.");
+                    return 1;
+                }
+
+                if ($canonicalApproved !== false && ($canonicalDb === false || $canonicalDb !== $canonicalApproved)) {
+                    $this->error("Safety violation: SQLite database path '{$database}' does not resolve to the canonical approved path '{$approvedPath}'. Execution aborted.");
+                    return 1;
+                }
             }
         } else {
             // Reject any other database drivers (mysql, mariadb, sqlsrv, etc.)
@@ -153,7 +186,7 @@ class CleanUserData extends Command
             return 1;
         }
 
-        // 8. Disposable Environment Identity Marker Verification
+        // 9. Disposable Environment Identity Marker Verification
         $marker = (string) (
             $this->option('disposable-marker') ?:
             config('database.disposable_instance_marker') ?:
@@ -173,7 +206,7 @@ class CleanUserData extends Command
             return 1;
         }
 
-        // 9. Independently Verify the Actual Live Connected Database Identity Before Deletion
+        // 10. Independently Verify the Actual Live Connected Database Identity Before Deletion
         try {
             $pdo = DB::connection($defaultConn)->getPdo();
         } catch (\Throwable $e) {
@@ -182,25 +215,51 @@ class CleanUserData extends Command
         }
 
         try {
-            $connectedIdentity = $this->getConnectedDatabaseName($defaultConn, $rawDriver, $pdo);
+            $connectedIdentity = $this->getConnectedDatabaseIdentity($defaultConn, $rawDriver, $pdo);
         } catch (\Throwable $e) {
             $this->error("Safety violation: Failed to verify live connected database identity: " . $e->getMessage());
             return 1;
         }
 
         if ($rawDriver === 'pgsql' || $rawDriver === 'postgres') {
-            if ($connectedIdentity !== self::ALLOWED_PGSQL_DATABASE) {
-                $this->error("Safety violation: Actual connected database '{$connectedIdentity}' does not match allowed disposable database '" . self::ALLOWED_PGSQL_DATABASE . "'. Aborting.");
+            if ($connectedIdentity['database'] !== self::ALLOWED_PGSQL_DATABASE) {
+                $this->error("Safety violation: Actual connected database '{$connectedIdentity['database']}' does not match allowed disposable database '" . self::ALLOWED_PGSQL_DATABASE . "'. Aborting.");
                 return 1;
             }
         } elseif ($rawDriver === 'sqlite') {
-            if ($connectedIdentity !== 'sqlite') {
-                $this->error("Safety violation: Connected database driver '{$connectedIdentity}' does not match expected sqlite driver. Aborting.");
-                return 1;
+            $isMemory = ($database === ':memory:');
+            if ($isMemory) {
+                if ($connectedIdentity['file'] !== '') {
+                    $this->error("Safety violation: Connected SQLite database is not an in-memory instance. Aborting.");
+                    return 1;
+                }
+            } else {
+                $approvedPath = database_path(self::ALLOWED_SQLITE_FILE);
+                $canonicalApproved = realpath($approvedPath);
+                $liveFile = $connectedIdentity['file'];
+
+                if (empty($liveFile) || is_link($liveFile)) {
+                    $this->error("Safety violation: Connected SQLite database path is empty or a symlink. Aborting.");
+                    return 1;
+                }
+
+                $canonicalLive = realpath($liveFile);
+                if ($canonicalLive === false || $canonicalApproved === false || $canonicalLive !== $canonicalApproved) {
+                    $this->error("Safety violation: Actual live connected SQLite database '{$liveFile}' does not match approved disposable canonical path '{$approvedPath}'. Aborting.");
+                    return 1;
+                }
             }
         }
 
-        // 10. Interactive confirmation (bypassed ONLY with --force, NEVER bypasses isolation checks)
+        // 11. Storage Isolation Verification: Ensure shared mock storage is not purged
+        try {
+            $disposableStorageDir = $this->getVerifiedDisposableStoragePath();
+        } catch (\DomainException $e) {
+            $this->error("Safety violation: " . $e->getMessage());
+            return 1;
+        }
+
+        // 12. Interactive confirmation (bypassed ONLY with --force, NEVER bypasses isolation checks)
         if (!$this->option('force')) {
             if (!$this->confirm("WARNING: This will wipe applicant accounts, applications, and documents from verified disposable test database '{$database}'. Categories, barangays, and admin accounts will be PRESERVED. Proceed?")) {
                 $this->info('Cleanup cancelled.');
@@ -210,67 +269,55 @@ class CleanUserData extends Command
 
         $this->info("Starting safe cleanup of user test data in verified disposable database '{$database}'...");
 
-        DB::beginTransaction();
+        DB::connection($defaultConn)->beginTransaction();
 
         try {
-            // 1. Delete transactional records
-            $docsCount = Document::count();
-            Document::query()->delete();
+            // 1. Delete transactional records on verified connection
+            $docsCount = Document::on($defaultConn)->count();
+            Document::on($defaultConn)->delete();
             $this->line("  - Deleted {$docsCount} document records.");
 
-            // 2. Purge local mock storage only (zero cloud interaction)
-            $mockDir = $storage->getLocalStoragePath();
-            $deletedFilesCount = 0;
-            if (is_dir($mockDir)) {
-                $iterator = new \RecursiveIteratorIterator(
-                    new \RecursiveDirectoryIterator($mockDir, \FilesystemIterator::SKIP_DOTS),
-                    \RecursiveIteratorIterator::CHILD_FIRST
-                );
-                foreach ($iterator as $item) {
-                    if ($item->isFile()) {
-                        @unlink($item->getPathname());
-                        $deletedFilesCount++;
-                    } elseif ($item->isDir()) {
-                        @rmdir($item->getPathname());
-                    }
-                }
+            // 2. Purge local mock storage only if verified isolated disposable storage root is established
+            if ($disposableStorageDir === null) {
+                $this->line("  - Storage isolation not established (shared mock root detected); filesystem deletion disabled.");
+            } else {
+                $this->purgeVerifiedDisposableStorage($disposableStorageDir);
             }
-            $this->line("  - Cleared local mock storage ({$deletedFilesCount} file(s) removed).");
 
-            if (Schema::hasTable('application_status_history')) {
-                $historyCount = DB::table('application_status_history')->count();
-                DB::table('application_status_history')->delete();
+            if (Schema::connection($defaultConn)->hasTable('application_status_history')) {
+                $historyCount = DB::connection($defaultConn)->table('application_status_history')->count();
+                DB::connection($defaultConn)->table('application_status_history')->delete();
                 $this->line("  - Deleted {$historyCount} application history records.");
             }
 
-            $appsCount = Application::count();
-            Application::query()->delete();
+            $appsCount = Application::on($defaultConn)->count();
+            Application::on($defaultConn)->delete();
             $this->line("  - Deleted {$appsCount} application records.");
 
-            $profilesCount = ApplicantProfile::count();
-            ApplicantProfile::query()->delete();
+            $profilesCount = ApplicantProfile::on($defaultConn)->count();
+            ApplicantProfile::on($defaultConn)->delete();
             $this->line("  - Deleted {$profilesCount} applicant profile records.");
 
-            $notifsCount = Notification::count();
-            Notification::query()->delete();
+            $notifsCount = Notification::on($defaultConn)->count();
+            Notification::on($defaultConn)->delete();
             $this->line("  - Deleted {$notifsCount} notifications.");
 
-            $auditsCount = AuditLog::count();
-            AuditLog::query()->delete();
+            $auditsCount = AuditLog::on($defaultConn)->count();
+            AuditLog::on($defaultConn)->delete();
             $this->line("  - Deleted {$auditsCount} audit logs.");
 
-            $verifsCount = EmailVerification::count();
-            EmailVerification::query()->delete();
+            $verifsCount = EmailVerification::on($defaultConn)->count();
+            EmailVerification::on($defaultConn)->delete();
             $this->line("  - Deleted {$verifsCount} email verifications.");
 
-            if (Schema::hasTable('personal_access_tokens')) {
-                $tokensCount = DB::table('personal_access_tokens')->count();
-                DB::table('personal_access_tokens')->delete();
+            if (Schema::connection($defaultConn)->hasTable('personal_access_tokens')) {
+                $tokensCount = DB::connection($defaultConn)->table('personal_access_tokens')->count();
+                DB::connection($defaultConn)->table('personal_access_tokens')->delete();
                 $this->line("  - Cleared {$tokensCount} personal access tokens.");
             }
 
             // 3. Delete non-admin user accounts, strictly preserving ALL admin and super_admin accounts
-            $nonAdminQuery = User::whereNotIn('role', ['admin', 'super_admin'])
+            $nonAdminQuery = User::on($defaultConn)->whereNotIn('role', ['admin', 'super_admin'])
                 ->where(function ($q) {
                     $q->where('email', '!=', 'cswdd.admin1@butuan.gov.ph')
                       ->orWhereNull('email');
@@ -281,11 +328,11 @@ class CleanUserData extends Command
             $this->line("  - Deleted {$nonAdminCount} non-admin user account(s).");
 
             // 4. Ensure Super Admin account exists WITHOUT overwriting any existing password
-            $superAdmin = User::where('role', 'super_admin')->first();
+            $superAdmin = User::on($defaultConn)->where('role', 'super_admin')->first();
             if (!$superAdmin) {
                 $seedPassword = env('SEED_ADMIN_PASSWORD');
                 if ($seedPassword) {
-                    User::create([
+                    User::on($defaultConn)->create([
                         'email' => 'cswdd.admin1@butuan.gov.ph',
                         'full_name' => 'Super Admin',
                         'password_hash' => Hash::make($seedPassword),
@@ -303,17 +350,17 @@ class CleanUserData extends Command
                 $this->line("  - Preserved existing Super Admin account ({$superAdmin->email}) without modifying credentials.");
             }
 
-            DB::commit();
+            DB::connection($defaultConn)->commit();
 
             // 5. Ensure reference data is preserved and intact
-            $categoryCount = Category::count();
+            $categoryCount = Category::on($defaultConn)->count();
             if ($categoryCount === 0) {
                 $this->warn('  ! Categories were empty, re-seeding now...');
                 (new CategorySeeder())->run();
-                $categoryCount = Category::count();
+                $categoryCount = Category::on($defaultConn)->count();
             }
 
-            $reqsCount = DB::table('documentary_requirements')->count();
+            $reqsCount = DB::connection($defaultConn)->table('documentary_requirements')->count();
 
             // 6. Application-specific cache invalidation (NO global Cache::flush)
             $scopedCacheKeys = [
@@ -334,32 +381,156 @@ class CleanUserData extends Command
             $this->info('═════════════════════════════════════════════════════');
             $this->info("  Preserved Categories:    {$categoryCount} categories");
             $this->info("  Preserved Requirements:  {$reqsCount} requirements");
-            if (Schema::hasTable('barangays')) {
-                $barangaysCount = DB::table('barangays')->count();
+            if (Schema::connection($defaultConn)->hasTable('barangays')) {
+                $barangaysCount = DB::connection($defaultConn)->table('barangays')->count();
                 $this->info("  Preserved Barangays:     {$barangaysCount} barangays");
             }
-            $this->info("  Preserved Admin Users:   " . User::whereIn('role', ['admin', 'super_admin'])->count() . " admin(s)");
+            $this->info("  Preserved Admin Users:   " . User::on($defaultConn)->whereIn('role', ['admin', 'super_admin'])->count() . " admin(s)");
             $this->info('═════════════════════════════════════════════════════');
             $this->info('System is clean and ready for new applicant registration.');
 
             return 0;
         } catch (\Exception $e) {
-            DB::rollBack();
+            DB::connection($defaultConn)->rollBack();
             $this->error('Cleanup failed: ' . $e->getMessage());
             return 1;
         }
     }
 
     /**
-     * Independently query and return the connected database name or driver identity.
+     * Resolve and verify the isolated disposable storage root.
+     * Returns the verified canonical directory path, or null if storage isolation is not established
+     * (in which case filesystem deletion is strictly disabled to protect shared local files).
+     *
+     * @throws \DomainException If an invalid, escaping, or unapproved storage path is configured.
      */
-    protected function getConnectedDatabaseName(string $connection, string $driver, \PDO $pdo): string
+    protected function getVerifiedDisposableStoragePath(): ?string
+    {
+        $configured = config('services.supabase.disposable_storage_path')
+            ?: config('filesystems.disposable_storage_root')
+            ?: env('DISPOSABLE_STORAGE_ROOT')
+            ?: env('DISPOSABLE_STORAGE_PATH');
+
+        $candidate = $configured ?: storage_path('app/' . self::ALLOWED_DISPOSABLE_STORAGE_DIR);
+
+        $generalMockPath = storage_path('app/mock_supabase');
+        $canonicalGeneral = realpath($generalMockPath);
+
+        // Normalize paths
+        $normCandidate = str_replace('\\', '/', $candidate);
+        $normGeneral = $canonicalGeneral ? str_replace('\\', '/', $canonicalGeneral) : str_replace('\\', '/', $generalMockPath);
+
+        // Check if candidate matches or resides within shared mock storage
+        if ($normCandidate === $normGeneral || str_starts_with($normCandidate, $normGeneral . '/')) {
+            if ($configured) {
+                throw new \DomainException("Configured disposable storage root '{$candidate}' targets shared mock storage. Refusing execution to prevent cross-environment data loss.");
+            }
+            return null;
+        }
+
+        if (!file_exists($candidate)) {
+            if ($configured) {
+                throw new \DomainException("Configured disposable storage root does not exist: {$candidate}");
+            }
+            return null;
+        }
+
+        $canonicalCandidate = realpath($candidate);
+        if ($canonicalCandidate === false || is_link($candidate)) {
+            throw new \DomainException("Disposable storage root cannot be a symlink or unresolved path: {$candidate}");
+        }
+
+        // Prohibited system and app roots
+        $appStorageBase = realpath(storage_path('app'));
+        if ($appStorageBase === false || !str_starts_with($canonicalCandidate, $appStorageBase . DIRECTORY_SEPARATOR)) {
+            throw new \DomainException("Disposable storage root '{$candidate}' escapes approved storage boundary.");
+        }
+
+        $baseDirname = basename($canonicalCandidate);
+        if ($baseDirname !== self::ALLOWED_DISPOSABLE_STORAGE_DIR && !str_starts_with($baseDirname, 'disposable_e2e')) {
+            throw new \DomainException("Disposable storage directory name '{$baseDirname}' is not an approved disposable target (must be '" . self::ALLOWED_DISPOSABLE_STORAGE_DIR . "').");
+        }
+
+        return $canonicalCandidate;
+    }
+
+    /**
+     * Safely purge files inside the verified isolated disposable storage directory.
+     */
+    protected function purgeVerifiedDisposableStorage(string $disposableStorageDir): void
+    {
+        $canonicalBase = realpath($disposableStorageDir);
+        if ($canonicalBase === false || is_link($disposableStorageDir)) {
+            $this->warn("  ! Disposable storage directory is invalid or symlinked. Skipping filesystem cleanup.");
+            return;
+        }
+
+        $deletedFilesCount = 0;
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($canonicalBase, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+
+        foreach ($iterator as $item) {
+            $itemPath = $item->getPathname();
+            if (is_link($itemPath)) {
+                @unlink($itemPath);
+                continue;
+            }
+
+            $canonicalItem = realpath($itemPath);
+            if ($canonicalItem === false || !str_starts_with($canonicalItem, $canonicalBase . DIRECTORY_SEPARATOR)) {
+                continue;
+            }
+
+            if ($item->isFile()) {
+                @unlink($canonicalItem);
+                $deletedFilesCount++;
+            } elseif ($item->isDir()) {
+                @rmdir($canonicalItem);
+            }
+        }
+
+        $this->line("  - Cleared isolated disposable storage ({$deletedFilesCount} file(s) removed).");
+    }
+
+    /**
+     * Independently query and return the connected database identity.
+     *
+     * @return array{driver: string, database: string, file: string}
+     */
+    protected function getConnectedDatabaseIdentity(string $connection, string $driver, \PDO $pdo): array
     {
         if ($driver === 'pgsql' || $driver === 'postgres') {
             $connectedDbRow = DB::connection($connection)->selectOne("SELECT current_database() AS db");
-            return (string) ($connectedDbRow->db ?? '');
+            return [
+                'driver'   => 'pgsql',
+                'database' => (string) ($connectedDbRow->db ?? ''),
+                'file'     => '',
+            ];
         }
 
-        return (string) $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        if ($driver === 'sqlite') {
+            $stmt = $pdo->query('PRAGMA database_list');
+            $rows = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+            $mainFile = '';
+            foreach ($rows as $row) {
+                if (($row['name'] ?? '') === 'main') {
+                    $mainFile = (string) ($row['file'] ?? '');
+                    break;
+                }
+            }
+            return [
+                'driver'   => 'sqlite',
+                'database' => $mainFile ? basename($mainFile) : ':memory:',
+                'file'     => $mainFile,
+            ];
+        }
+
+        return [
+            'driver'   => (string) $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME),
+            'database' => '',
+            'file'     => '',
+        ];
     }
 }

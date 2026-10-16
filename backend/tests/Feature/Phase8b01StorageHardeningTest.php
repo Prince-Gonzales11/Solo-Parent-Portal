@@ -642,6 +642,7 @@ class Phase8b01StorageHardeningTest extends TestCase
     {
         try {
             config([
+                'database.default' => 'pgsql',
                 'database.connections.pgsql.driver' => 'pgsql',
                 'database.connections.pgsql.host' => '127.0.0.1',
                 'database.connections.pgsql.database' => 'solo_parent_local_test',
@@ -650,14 +651,16 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $exitCode = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
             $this->assertEquals(1, $exitCode);
             $this->assertStringContainsString("strictly prohibited against primary test database 'solo_parent_local_test'", Artisan::output());
         } finally {
-            config(['database.connections.pgsql.database' => 'laravel']);
+            config([
+                'database.default' => 'sqlite',
+                'database.connections.pgsql.database' => 'laravel',
+            ]);
         }
     }
 
@@ -665,6 +668,7 @@ class Phase8b01StorageHardeningTest extends TestCase
     {
         try {
             config([
+                'database.default' => 'pgsql',
                 'database.connections.pgsql.driver' => 'pgsql',
                 'database.connections.pgsql.host' => '127.0.0.1',
                 'database.connections.pgsql.database' => 'solo_parent_db',
@@ -673,14 +677,16 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $exitCode = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
             $this->assertEquals(1, $exitCode);
             $this->assertStringContainsString("strictly prohibited against database 'solo_parent_db'", Artisan::output());
         } finally {
-            config(['database.connections.pgsql.database' => 'laravel']);
+            config([
+                'database.default' => 'sqlite',
+                'database.connections.pgsql.database' => 'laravel',
+            ]);
         }
     }
 
@@ -688,6 +694,7 @@ class Phase8b01StorageHardeningTest extends TestCase
     {
         try {
             config([
+                'database.default' => 'pgsql',
                 'database.connections.pgsql.driver' => 'pgsql',
                 'database.connections.pgsql.host' => '127.0.0.1',
                 'database.connections.pgsql.database' => 'solo_parent_disposable_e2e_fake',
@@ -696,14 +703,16 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $exitCode = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
             $this->assertEquals(1, $exitCode);
             $this->assertStringContainsString("Only exact allowlisted database '" . CleanUserData::ALLOWED_PGSQL_DATABASE . "' is permitted", Artisan::output());
         } finally {
-            config(['database.connections.pgsql.database' => 'laravel']);
+            config([
+                'database.default' => 'sqlite',
+                'database.connections.pgsql.database' => 'laravel',
+            ]);
         }
     }
 
@@ -742,6 +751,7 @@ class Phase8b01StorageHardeningTest extends TestCase
         try {
             // 1. Rejection of superuser account
             config([
+                'database.default' => 'pgsql',
                 'database.connections.pgsql.driver' => 'pgsql',
                 'database.connections.pgsql.host' => '127.0.0.1',
                 'database.connections.pgsql.database' => CleanUserData::ALLOWED_PGSQL_DATABASE,
@@ -750,7 +760,6 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $exitCodeSuper = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
@@ -761,7 +770,6 @@ class Phase8b01StorageHardeningTest extends TestCase
             config(['database.connections.pgsql.username' => 'unauthorized_hacker']);
 
             $exitCodeUnauth = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
@@ -769,6 +777,7 @@ class Phase8b01StorageHardeningTest extends TestCase
             $this->assertStringContainsString("Database user 'unauthorized_hacker' is not authorized", Artisan::output());
         } finally {
             config([
+                'database.default' => 'sqlite',
                 'database.connections.pgsql.username' => 'root',
                 'database.connections.pgsql.database' => 'laravel',
             ]);
@@ -791,6 +800,210 @@ class Phase8b01StorageHardeningTest extends TestCase
             $this->assertStringContainsString("is not an approved disposable target", Artisan::output());
         } finally {
             config(['database.connections.sqlite.database' => ':memory:']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_sqlite_file_with_same_basename_in_different_directory(): void
+    {
+        $altDir = storage_path('app/alt_test_dir');
+        if (!is_dir($altDir)) {
+            mkdir($altDir, 0750, true);
+        }
+        $altFile = $altDir . DIRECTORY_SEPARATOR . CleanUserData::ALLOWED_SQLITE_FILE;
+        touch($altFile);
+
+        try {
+            config([
+                'database.connections.sqlite.database' => $altFile,
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("does not resolve to the canonical approved path", Artisan::output());
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+            @unlink($altFile);
+            @rmdir($altDir);
+        }
+    }
+
+    public function test_clean_user_data_refuses_lookalike_sqlite_filenames(): void
+    {
+        try {
+            config([
+                'database.connections.sqlite.database' => database_path('disposable_e2e_fake.sqlite'),
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("is not an approved disposable target", Artisan::output());
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_connection_override_even_when_matching_default(): void
+    {
+        try {
+            config([
+                'database.default' => 'sqlite',
+                'database.connections.sqlite.database' => ':memory:',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'sqlite',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("Connection override '--connection' is disabled", Artisan::output());
+        } finally {
+            config(['database.default' => 'sqlite']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_connection_override_and_preserves_default_database(): void
+    {
+        $protectedUser = User::create([
+            'id' => (string) Str::uuid(),
+            'email' => 'protected_default_user@example.com',
+            'full_name' => 'Protected Default User',
+            'role' => 'applicant',
+            'is_active' => true,
+        ]);
+
+        try {
+            config([
+                'database.default' => 'sqlite',
+                'database.connections.sqlite.database' => ':memory:',
+                'database.connections.disposable_pg.driver' => 'pgsql',
+                'database.connections.disposable_pg.host' => '127.0.0.1',
+                'database.connections.disposable_pg.database' => CleanUserData::ALLOWED_PGSQL_DATABASE,
+                'database.connections.disposable_pg.username' => 'solo_parent_tester',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'disposable_pg',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('Connection mismatch detected', Artisan::output());
+
+            // Default database records MUST be completely untouched
+            $this->assertDatabaseHas('users', ['id' => $protectedUser->id]);
+        } finally {
+            config(['database.default' => 'sqlite']);
+        }
+    }
+
+    public function test_clean_user_data_disables_storage_deletion_when_shared_mock_storage_detected(): void
+    {
+        $sharedMockDir = storage_path('app/mock_supabase');
+        if (!is_dir($sharedMockDir)) {
+            mkdir($sharedMockDir, 0750, true);
+        }
+        $sharedFile = $sharedMockDir . DIRECTORY_SEPARATOR . 'protected_shared_file.txt';
+        file_put_contents($sharedFile, 'critical shared data');
+
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'database.connections.sqlite.host' => '127.0.0.1',
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+
+            $this->assertEquals(0, $exitCode);
+            $output = Artisan::output();
+            $this->assertStringContainsString('Storage isolation not established (shared mock root detected); filesystem deletion disabled', $output);
+
+            // Crucial: File in shared mock directory must STILL exist
+            $this->assertFileExists($sharedFile);
+        } finally {
+            @unlink($sharedFile);
+        }
+    }
+
+    public function test_clean_user_data_refuses_unauthorized_or_escaping_disposable_storage_root(): void
+    {
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'services.supabase.disposable_storage_path' => storage_path('app/mock_supabase'),
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('targets shared mock storage', Artisan::output());
+        } finally {
+            config(['services.supabase.disposable_storage_path' => null]);
+        }
+    }
+
+    public function test_clean_user_data_purges_only_verified_isolated_disposable_storage_root(): void
+    {
+        $isolatedDir = storage_path('app/' . CleanUserData::ALLOWED_DISPOSABLE_STORAGE_DIR);
+        if (!is_dir($isolatedDir)) {
+            mkdir($isolatedDir, 0750, true);
+        }
+        $disposableFile = $isolatedDir . DIRECTORY_SEPARATOR . 'disposable_doc.pdf';
+        file_put_contents($disposableFile, 'disposable test document');
+
+        $sharedMockDir = storage_path('app/mock_supabase');
+        if (!is_dir($sharedMockDir)) {
+            mkdir($sharedMockDir, 0750, true);
+        }
+        $preservedFile = $sharedMockDir . DIRECTORY_SEPARATOR . 'preserved_shared_doc.pdf';
+        file_put_contents($preservedFile, 'do not delete me');
+
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'services.supabase.disposable_storage_path' => $isolatedDir,
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+
+            $this->assertEquals(0, $exitCode);
+            $output = Artisan::output();
+            $this->assertStringContainsString('Cleared isolated disposable storage', $output);
+
+            // Disposable file was purged
+            $this->assertFileDoesNotExist($disposableFile);
+
+            // Shared file MUST still exist intact
+            $this->assertFileExists($preservedFile);
+        } finally {
+            config(['services.supabase.disposable_storage_path' => null]);
+            @unlink($disposableFile);
+            @unlink($preservedFile);
+            @rmdir($isolatedDir);
         }
     }
 
@@ -823,6 +1036,7 @@ class Phase8b01StorageHardeningTest extends TestCase
         try {
             // 1. Rejection of suspected forwarded cloud pooler port (6543)
             config([
+                'database.default' => 'pgsql',
                 'database.connections.pgsql.driver' => 'pgsql',
                 'database.connections.pgsql.host' => '127.0.0.1',
                 'database.connections.pgsql.port' => 6543,
@@ -832,7 +1046,6 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $exitCodePort = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
@@ -846,7 +1059,6 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $exitCodeSsl = Artisan::call('portal:clean-user-data', [
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
@@ -854,6 +1066,7 @@ class Phase8b01StorageHardeningTest extends TestCase
             $this->assertStringContainsString('Detected potentially forwarded or tunneled remote database configuration', Artisan::output());
         } finally {
             config([
+                'database.default' => 'sqlite',
                 'database.connections.pgsql.port' => 5432,
                 'database.connections.pgsql.sslmode' => 'prefer',
                 'database.connections.pgsql.database' => 'laravel',
@@ -866,6 +1079,7 @@ class Phase8b01StorageHardeningTest extends TestCase
     {
         try {
             config([
+                'database.default' => 'pgsql',
                 'database.connections.pgsql.driver' => 'pgsql',
                 'database.connections.pgsql.host' => '127.0.0.1',
                 'database.connections.pgsql.port' => 5432,
@@ -876,15 +1090,18 @@ class Phase8b01StorageHardeningTest extends TestCase
             ]);
 
             $mismatchedCommand = new class extends CleanUserData {
-                protected function getConnectedDatabaseName(string $connection, string $driver, \PDO $pdo): string
+                protected function getConnectedDatabaseIdentity(string $connection, string $driver, \PDO $pdo): array
                 {
-                    return 'unauthorized_different_database';
+                    return [
+                        'driver' => 'pgsql',
+                        'database' => 'unauthorized_different_database',
+                        'file' => '',
+                    ];
                 }
             };
             $mismatchedCommand->setLaravel($this->app);
 
             $input = new \Symfony\Component\Console\Input\ArrayInput([
-                '--connection' => 'pgsql',
                 '--force' => true,
                 '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
             ]);
@@ -896,6 +1113,7 @@ class Phase8b01StorageHardeningTest extends TestCase
             $this->assertStringContainsString("Actual connected database 'unauthorized_different_database' does not match allowed disposable database", $output->fetch());
         } finally {
             config([
+                'database.default' => 'sqlite',
                 'database.connections.pgsql.database' => 'laravel',
                 'database.connections.pgsql.username' => 'root',
             ]);
