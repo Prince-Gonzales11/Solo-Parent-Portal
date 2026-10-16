@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Console\Commands\CleanUserData;
 use App\Models\Application;
 use App\Models\Category;
 use App\Models\Document;
@@ -30,6 +31,15 @@ class Phase8b01StorageHardeningTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.driver' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+            'database.connections.sqlite.host' => '',
+            'services.supabase.driver' => 'local',
+            'cache.default' => 'array',
+        ]);
 
         $this->user = User::create([
             'id' => (string) Str::uuid(),
@@ -64,6 +74,20 @@ class Phase8b01StorageHardeningTest extends TestCase
             'application_type' => 'new_id',
             'reference_no' => 'SP-2026-HARDEN-001',
         ]);
+    }
+
+    protected function tearDown(): void
+    {
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.driver' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+            'database.connections.sqlite.host' => '',
+            'services.supabase.driver' => 'local',
+            'cache.default' => 'array',
+        ]);
+
+        parent::tearDown();
     }
 
     /**
@@ -561,98 +585,479 @@ class Phase8b01StorageHardeningTest extends TestCase
      */
     public function test_clean_user_data_refuses_execution_in_production_environment(): void
     {
-        $this->app->detectEnvironment(fn () => 'production');
+        try {
+            $this->app->detectEnvironment(fn () => 'production');
 
-        $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
-        $this->assertEquals(1, $exitCode);
-        $this->assertStringContainsString('strictly prohibited in PRODUCTION environment', Artisan::output());
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('strictly prohibited in PRODUCTION environment', Artisan::output());
+        } finally {
+            $this->app->detectEnvironment(fn () => 'testing');
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_in_staging_environment(): void
+    {
+        try {
+            $this->app->detectEnvironment(fn () => 'staging');
+
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('strictly prohibited in STAGING environment', Artisan::output());
+        } finally {
+            $this->app->detectEnvironment(fn () => 'testing');
+        }
     }
 
     public function test_clean_user_data_refuses_execution_against_remote_database_host(): void
     {
-        config(['database.connections.sqlite.host' => 'db.nntovqphomdbsomshbsp.supabase.co']);
+        try {
+            config(['database.connections.sqlite.host' => 'db.nntovqphomdbsomshbsp.supabase.co']);
 
-        $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
-        $this->assertEquals(1, $exitCode);
-        $this->assertStringContainsString('strictly prohibited against non-local database host', Artisan::output());
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('strictly prohibited against non-local database host', Artisan::output());
+        } finally {
+            config(['database.connections.sqlite.host' => '']);
+        }
     }
 
     public function test_clean_user_data_refuses_execution_against_cloud_database_name(): void
     {
-        config(['database.connections.sqlite.database' => 'production_cloud_db']);
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'database.connections.sqlite.database' => 'production_cloud_db',
+            ]);
 
-        $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
-        $this->assertEquals(1, $exitCode);
-        $this->assertStringContainsString('matches prohibited remote/cloud pattern', Artisan::output());
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('matches prohibited remote/cloud pattern', Artisan::output());
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_against_original_local_database_solo_parent_local_test(): void
+    {
+        try {
+            config([
+                'database.connections.pgsql.driver' => 'pgsql',
+                'database.connections.pgsql.host' => '127.0.0.1',
+                'database.connections.pgsql.database' => 'solo_parent_local_test',
+                'database.connections.pgsql.username' => 'solo_parent_tester',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("strictly prohibited against primary test database 'solo_parent_local_test'", Artisan::output());
+        } finally {
+            config(['database.connections.pgsql.database' => 'laravel']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_against_arbitrary_database_names(): void
+    {
+        try {
+            config([
+                'database.connections.pgsql.driver' => 'pgsql',
+                'database.connections.pgsql.host' => '127.0.0.1',
+                'database.connections.pgsql.database' => 'solo_parent_db',
+                'database.connections.pgsql.username' => 'solo_parent_tester',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("strictly prohibited against database 'solo_parent_db'", Artisan::output());
+        } finally {
+            config(['database.connections.pgsql.database' => 'laravel']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_against_lookalike_disposable_database_names(): void
+    {
+        try {
+            config([
+                'database.connections.pgsql.driver' => 'pgsql',
+                'database.connections.pgsql.host' => '127.0.0.1',
+                'database.connections.pgsql.database' => 'solo_parent_disposable_e2e_fake',
+                'database.connections.pgsql.username' => 'solo_parent_tester',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("Only exact allowlisted database '" . CleanUserData::ALLOWED_PGSQL_DATABASE . "' is permitted", Artisan::output());
+        } finally {
+            config(['database.connections.pgsql.database' => 'laravel']);
+        }
     }
 
     public function test_clean_user_data_refuses_execution_against_non_local_storage_driver(): void
     {
-        config(['services.supabase.driver' => 'supabase']);
+        try {
+            config(['services.supabase.driver' => 'supabase']);
 
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("strictly prohibited against non-local storage driver 'supabase'", Artisan::output());
+        } finally {
+            config(['services.supabase.driver' => 'local']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_when_disposable_marker_is_missing(): void
+    {
         $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
         $this->assertEquals(1, $exitCode);
-        $this->assertStringContainsString("strictly prohibited against remote storage driver 'supabase'", Artisan::output());
+        $this->assertStringContainsString('Missing required disposable environment identity marker', Artisan::output());
+    }
+
+    public function test_clean_user_data_refuses_execution_when_disposable_marker_is_incorrect(): void
+    {
+        $exitCode = Artisan::call('portal:clean-user-data', [
+            '--force' => true,
+            '--disposable-marker' => 'wrong_untrusted_token_123',
+        ]);
+        $this->assertEquals(1, $exitCode);
+        $this->assertStringContainsString("Invalid disposable environment identity marker 'wrong_untrusted_token_123'", Artisan::output());
+    }
+
+    public function test_clean_user_data_refuses_execution_with_unauthorized_database_credentials(): void
+    {
+        try {
+            // 1. Rejection of superuser account
+            config([
+                'database.connections.pgsql.driver' => 'pgsql',
+                'database.connections.pgsql.host' => '127.0.0.1',
+                'database.connections.pgsql.database' => CleanUserData::ALLOWED_PGSQL_DATABASE,
+                'database.connections.pgsql.username' => 'postgres',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCodeSuper = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCodeSuper);
+            $this->assertStringContainsString("Database user 'postgres' has excessive administrative privileges", Artisan::output());
+
+            // 2. Rejection of unlisted user account
+            config(['database.connections.pgsql.username' => 'unauthorized_hacker']);
+
+            $exitCodeUnauth = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCodeUnauth);
+            $this->assertStringContainsString("Database user 'unauthorized_hacker' is not authorized", Artisan::output());
+        } finally {
+            config([
+                'database.connections.pgsql.username' => 'root',
+                'database.connections.pgsql.database' => 'laravel',
+            ]);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_against_arbitrary_sqlite_filenames(): void
+    {
+        try {
+            config([
+                'database.connections.sqlite.database' => database_path('arbitrary_test.sqlite'),
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("is not an approved disposable target", Artisan::output());
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_with_shared_cache_backend(): void
+    {
+        try {
+            config(['cache.default' => 'redis']);
+
+            $exitCodeRedis = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCodeRedis);
+            $this->assertStringContainsString("cannot run with shared cache store 'redis'", Artisan::output());
+
+            config(['cache.default' => 'memcached']);
+            $exitCodeMem = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCodeMem);
+            $this->assertStringContainsString("cannot run with shared cache store 'memcached'", Artisan::output());
+        } finally {
+            config(['cache.default' => 'array']);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_against_unverified_localhost_forwarded_connections(): void
+    {
+        try {
+            // 1. Rejection of suspected forwarded cloud pooler port (6543)
+            config([
+                'database.connections.pgsql.driver' => 'pgsql',
+                'database.connections.pgsql.host' => '127.0.0.1',
+                'database.connections.pgsql.port' => 6543,
+                'database.connections.pgsql.database' => CleanUserData::ALLOWED_PGSQL_DATABASE,
+                'database.connections.pgsql.username' => 'solo_parent_tester',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $exitCodePort = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCodePort);
+            $this->assertStringContainsString('Detected potentially forwarded or tunneled remote database configuration', Artisan::output());
+
+            // 2. Rejection of remote TLS verification on localhost
+            config([
+                'database.connections.pgsql.port' => 5432,
+                'database.connections.pgsql.sslmode' => 'verify-full',
+            ]);
+
+            $exitCodeSsl = Artisan::call('portal:clean-user-data', [
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(1, $exitCodeSsl);
+            $this->assertStringContainsString('Detected potentially forwarded or tunneled remote database configuration', Artisan::output());
+        } finally {
+            config([
+                'database.connections.pgsql.port' => 5432,
+                'database.connections.pgsql.sslmode' => 'prefer',
+                'database.connections.pgsql.database' => 'laravel',
+                'database.connections.pgsql.username' => 'root',
+            ]);
+        }
+    }
+
+    public function test_clean_user_data_refuses_execution_when_connected_database_identity_mismatches(): void
+    {
+        try {
+            config([
+                'database.connections.pgsql.driver' => 'pgsql',
+                'database.connections.pgsql.host' => '127.0.0.1',
+                'database.connections.pgsql.port' => 5432,
+                'database.connections.pgsql.database' => CleanUserData::ALLOWED_PGSQL_DATABASE,
+                'database.connections.pgsql.username' => 'solo_parent_tester',
+                'database.connections.pgsql.sslmode' => 'prefer',
+                'services.supabase.driver' => 'local',
+            ]);
+
+            $mismatchedCommand = new class extends CleanUserData {
+                protected function getConnectedDatabaseName(string $connection, string $driver, \PDO $pdo): string
+                {
+                    return 'unauthorized_different_database';
+                }
+            };
+            $mismatchedCommand->setLaravel($this->app);
+
+            $input = new \Symfony\Component\Console\Input\ArrayInput([
+                '--connection' => 'pgsql',
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $output = new \Symfony\Component\Console\Output\BufferedOutput();
+
+            $exitCode = $mismatchedCommand->run($input, $output);
+
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString("Actual connected database 'unauthorized_different_database' does not match allowed disposable database", $output->fetch());
+        } finally {
+            config([
+                'database.connections.pgsql.database' => 'laravel',
+                'database.connections.pgsql.username' => 'root',
+            ]);
+        }
     }
 
     public function test_clean_user_data_force_flag_cannot_bypass_environment_safeguards(): void
     {
-        $this->app->detectEnvironment(fn () => 'production');
+        try {
+            $this->app->detectEnvironment(fn () => 'production');
 
-        // Force flag must NOT bypass production prohibition
-        $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
-        $this->assertEquals(1, $exitCode);
-        $this->assertStringContainsString('strictly prohibited in PRODUCTION', Artisan::output());
+            // Force flag must NOT bypass production prohibition
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('strictly prohibited in PRODUCTION', Artisan::output());
+        } finally {
+            $this->app->detectEnvironment(fn () => 'testing');
+        }
     }
 
-    public function test_clean_user_data_strictly_preserves_super_admin_and_admin_passwords(): void
+    public function test_clean_user_data_force_flag_cannot_bypass_missing_disposable_marker(): void
     {
-        config([
-            'services.supabase.driver' => 'local',
-            'database.connections.sqlite.host' => '127.0.0.1',
-            'database.connections.sqlite.database' => ':memory:',
-        ]);
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'database.connections.sqlite.host' => '127.0.0.1',
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
 
-        $customPassword = 'MySecretSuperAdminPassword_2026!';
-        $superAdmin = User::create([
-            'id' => (string) Str::uuid(),
-            'email' => 'cswdd.admin1@butuan.gov.ph',
-            'full_name' => 'Original Super Admin',
-            'password_hash' => \Illuminate\Support\Facades\Hash::make($customPassword),
-            'role' => 'super_admin',
-            'is_active' => true,
-        ]);
+            // Force flag without disposable marker must still fail closed
+            $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
+            $this->assertEquals(1, $exitCode);
+            $this->assertStringContainsString('Missing required disposable environment identity marker', Artisan::output());
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+        }
+    }
 
-        $adminOfficer = User::create([
-            'id' => (string) Str::uuid(),
-            'email' => 'cswdd.staff1@butuan.gov.ph',
-            'full_name' => 'Regular Admin Staff',
-            'password_hash' => \Illuminate\Support\Facades\Hash::make('AdminStaffPass123!'),
-            'role' => 'admin',
-            'is_active' => true,
-        ]);
-
+    public function test_clean_user_data_confirms_zero_destructive_effects_when_safeguards_fail(): void
+    {
         $applicant = User::create([
             'id' => (string) Str::uuid(),
-            'email' => 'applicant_to_clean@example.com',
-            'full_name' => 'Applicant User',
-            'password_hash' => \Illuminate\Support\Facades\Hash::make('ApplicantPass123!'),
+            'email' => 'protected_applicant@example.com',
+            'full_name' => 'Protected Applicant',
             'role' => 'applicant',
             'is_active' => true,
         ]);
 
-        $exitCode = Artisan::call('portal:clean-user-data', ['--force' => true]);
-        $this->assertEquals(0, $exitCode);
+        $app = Application::create([
+            'id' => (string) Str::uuid(),
+            'user_id' => $applicant->id,
+            'category_id' => $this->category->id,
+            'status' => 'draft',
+            'reference_no' => 'SP-PROTECT-001',
+        ]);
 
-        // Applicant must be deleted
-        $this->assertDatabaseMissing('users', ['id' => $applicant->id]);
+        $doc = Document::create([
+            'id' => (string) Str::uuid(),
+            'user_id' => $applicant->id,
+            'application_id' => $app->id,
+            'requirement_id' => $this->req->id,
+            'original_filename' => 'protected_birth_cert.pdf',
+            'storage_path' => 'mock_path/protected_birth_cert.pdf',
+            'temporary_storage_path' => 'mock_path/protected_birth_cert.pdf',
+            'storage_status' => 'temporary',
+            'mime_type' => 'application/pdf',
+            'file_size' => 2048,
+            'review_status' => 'pending',
+        ]);
 
-        // Regular admin MUST be preserved
-        $this->assertDatabaseHas('users', ['id' => $adminOfficer->id, 'role' => 'admin']);
+        // Attempt destructive cleanup with invalid disposable marker
+        $exitCode = Artisan::call('portal:clean-user-data', [
+            '--force' => true,
+            '--disposable-marker' => 'invalid_untrusted_marker',
+        ]);
 
-        // Super Admin MUST be preserved AND its password hash MUST NOT have been overwritten
-        $refreshedAdmin = User::find($superAdmin->id);
-        $this->assertNotNull($refreshedAdmin);
-        $this->assertTrue(\Illuminate\Support\Facades\Hash::check($customPassword, $refreshedAdmin->password_hash));
+        $this->assertEquals(1, $exitCode);
+
+        // Verify zero database writes/deletions occurred
+        $this->assertDatabaseHas('users', ['id' => $applicant->id]);
+        $this->assertDatabaseHas('applications', ['id' => $app->id]);
+        $this->assertDatabaseHas('application_documents', ['id' => $doc->id]);
+    }
+
+    public function test_clean_user_data_permits_explicitly_verified_disposable_environment(): void
+    {
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'database.connections.sqlite.host' => '127.0.0.1',
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+
+            $this->assertEquals(0, $exitCode);
+            $output = Artisan::output();
+            $this->assertStringContainsString('CLEANUP COMPLETE — SYSTEM INTEGRITY VERIFIED', $output);
+            $this->assertStringContainsString('Invalidated portal application cache keys', $output);
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+        }
+    }
+
+    public function test_clean_user_data_strictly_preserves_super_admin_and_admin_passwords(): void
+    {
+        try {
+            config([
+                'services.supabase.driver' => 'local',
+                'database.connections.sqlite.host' => '127.0.0.1',
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
+
+            $customPassword = 'MySecretSuperAdminPassword_2026!';
+            $superAdmin = User::create([
+                'id' => (string) Str::uuid(),
+                'email' => 'cswdd.admin1@butuan.gov.ph',
+                'full_name' => 'Original Super Admin',
+                'password_hash' => \Illuminate\Support\Facades\Hash::make($customPassword),
+                'role' => 'super_admin',
+                'is_active' => true,
+            ]);
+
+            $adminOfficer = User::create([
+                'id' => (string) Str::uuid(),
+                'email' => 'cswdd.staff1@butuan.gov.ph',
+                'full_name' => 'Regular Admin Staff',
+                'password_hash' => \Illuminate\Support\Facades\Hash::make('AdminStaffPass123!'),
+                'role' => 'admin',
+                'is_active' => true,
+            ]);
+
+            $applicant = User::create([
+                'id' => (string) Str::uuid(),
+                'email' => 'applicant_to_clean@example.com',
+                'full_name' => 'Applicant User',
+                'password_hash' => \Illuminate\Support\Facades\Hash::make('ApplicantPass123!'),
+                'role' => 'applicant',
+                'is_active' => true,
+            ]);
+
+            $exitCode = Artisan::call('portal:clean-user-data', [
+                '--force' => true,
+                '--disposable-marker' => CleanUserData::REQUIRED_DISPOSABLE_MARKER,
+            ]);
+            $this->assertEquals(0, $exitCode);
+
+            // Applicant must be deleted
+            $this->assertDatabaseMissing('users', ['id' => $applicant->id]);
+
+            // Regular admin MUST be preserved
+            $this->assertDatabaseHas('users', ['id' => $adminOfficer->id, 'role' => 'admin']);
+
+            // Super Admin MUST be preserved AND its password hash MUST NOT have been overwritten
+            $refreshedAdmin = User::find($superAdmin->id);
+            $this->assertNotNull($refreshedAdmin);
+            $this->assertTrue(\Illuminate\Support\Facades\Hash::check($customPassword, $refreshedAdmin->password_hash));
+        } finally {
+            config(['database.connections.sqlite.database' => ':memory:']);
+        }
     }
 }
