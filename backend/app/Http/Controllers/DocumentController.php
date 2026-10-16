@@ -32,6 +32,8 @@ class DocumentController extends Controller
     const ALLOWED_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png', 'docx', 'doc'];
 
     const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+    const MAX_FILES_PER_BATCH = 10;
+    const MAX_BATCH_SIZE = 28 * 1024 * 1024; // 28MB (conservative limit under PHP post_max_size 35M)
 
     // Magic bytes for file signature validation
     const MAGIC_BYTES = [
@@ -141,7 +143,7 @@ class DocumentController extends Controller
     {
         $request->validate([
             'file'              => 'nullable|file|max:20480', // 20MB
-            'files'             => 'nullable|array',
+            'files'             => 'nullable|array|max:' . self::MAX_FILES_PER_BATCH,
             'files.*'           => 'file|max:20480',
             'doc_type'          => 'required|string|max:120',
             'requirement_id'    => 'nullable|string',
@@ -164,6 +166,25 @@ class DocumentController extends Controller
 
         if (empty($uploadedFiles)) {
             return response()->json(['detail' => 'Please select at least one file to upload.'], 422);
+        }
+
+        // ── Enforce batch attachment count limit (prevents silent truncation) ─
+        if (count($uploadedFiles) > self::MAX_FILES_PER_BATCH) {
+            return response()->json([
+                'detail' => 'You may upload a maximum of ' . self::MAX_FILES_PER_BATCH . ' files per batch. Please upload additional documents in subsequent batches.',
+            ], 422);
+        }
+
+        // ── Enforce total request size limit (conservative 28MB limit for 35M post_max_size) ─
+        $totalBatchBytes = 0;
+        foreach ($uploadedFiles as $f) {
+            $totalBatchBytes += $f->getSize();
+        }
+        if ($totalBatchBytes > self::MAX_BATCH_SIZE) {
+            $formattedMb = round($totalBatchBytes / (1024 * 1024), 1);
+            return response()->json([
+                'detail' => "The combined size of all uploaded files in this batch ({$formattedMb} MB) exceeds the maximum allowed batch size of 28 MB. Please select fewer or smaller files.",
+            ], 422);
         }
 
         // ── Pre-validate all files upfront ────────────────────────────

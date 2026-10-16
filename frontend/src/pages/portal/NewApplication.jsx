@@ -130,25 +130,42 @@ export default function NewApplication() {
     }
   }, [step]);
 
-  const handleUpload = async (file, docType, reqConfig) => {
-    if (!file) return;
-    if (reqConfig?.formats) {
-      const ext = '.' + file.name.split('.').pop().toLowerCase();
-      if (!reqConfig.formats.includes(ext)) {
-        toast.error(`Invalid format. Allowed: ${reqConfig.formats.join(', ')}`);
+  const handleUpload = async (filesOrFile, docType, reqConfig) => {
+    if (!filesOrFile) return;
+    const filesArray = Array.isArray(filesOrFile) ? filesOrFile : [filesOrFile];
+    if (filesArray.length === 0) return;
+
+    if (filesArray.length > 10) {
+      toast.error('You may upload a maximum of 10 files per batch. Please upload additional documents in subsequent batches.');
+      return;
+    }
+
+    const MAX_BATCH_SIZE = 28 * 1024 * 1024;
+    let totalBytes = 0;
+    for (const file of filesArray) {
+      if (reqConfig?.formats) {
+        const ext = '.' + file.name.split('.').pop().toLowerCase();
+        if (!reqConfig.formats.includes(ext)) {
+          toast.error(`Invalid format for "${file.name}". Allowed: ${reqConfig.formats.join(', ')}`);
+          return;
+        }
+      }
+      const maxAllowed = (reqConfig?.max_size_mb || 20) * 1024 * 1024;
+      if (file.size > maxAllowed) {
+        toast.error(`File "${file.name}" (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the limit of ${reqConfig?.max_size_mb || 20}MB.`);
         return;
       }
-      if (file.size > reqConfig.max_size_mb * 1024 * 1024) {
-        toast.error(`File too large. Max: ${reqConfig.max_size_mb}MB`);
-        return;
-      }
+      totalBytes += file.size;
+    }
+
+    if (totalBytes > MAX_BATCH_SIZE) {
+      toast.error(`The combined size of selected files (${(totalBytes / (1024 * 1024)).toFixed(1)} MB) exceeds the maximum batch limit of 28 MB. Please upload fewer or smaller files.`);
+      return;
     }
 
     setUploading(prev => ({ ...prev, [docType]: true }));
-    const filesArray = Array.isArray(files) ? files : [files];
     const fd = new FormData();
     filesArray.forEach(f => fd.append('files[]', f));
-    fd.append('file', filesArray[0]);
     fd.append('doc_type', docType);
     if (reqConfig?.name) fd.append('label', reqConfig.name);
     if (reqConfig?.name) fd.append('requirement_name', reqConfig.name);
@@ -157,12 +174,17 @@ export default function NewApplication() {
     try {
       const res = await api.post('/documents/upload', fd);
       const newDocs = res.data?.documents || (Array.isArray(res.data) ? res.data : [res.data]);
+      const acknowledgedCount = res.data?.count ?? (Array.isArray(res.data?.documents) ? res.data.documents.length : newDocs.length);
       setDocuments(prev => {
         const newIds = new Set(newDocs.map(d => d.id));
         const filtered = prev.filter(d => !newIds.has(d.id));
         return [...filtered, ...newDocs];
       });
-      toast.success(newDocs.length > 1 ? `${newDocs.length} attachments uploaded!` : 'Document uploaded!');
+      if (acknowledgedCount < filesArray.length) {
+        toast.warning(`${acknowledgedCount} of ${filesArray.length} files were acknowledged. Some files may not have been saved.`);
+      } else {
+        toast.success(acknowledgedCount > 1 ? `All ${acknowledgedCount} attachments uploaded!` : 'Document uploaded!');
+      }
     } catch (err) {
       toastError(err, 'Upload failed.');
       throw err;

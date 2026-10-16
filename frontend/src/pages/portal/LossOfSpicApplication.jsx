@@ -153,6 +153,13 @@ export default function LossOfSpicApplication() {
     const filesArray = Array.isArray(files) ? files : [files];
     if (filesArray.length === 0) return;
 
+    if (filesArray.length > 10) {
+      toast.error('You may upload a maximum of 10 files per batch. Please upload additional documents in subsequent batches.');
+      return;
+    }
+
+    const MAX_BATCH_SIZE = 28 * 1024 * 1024; // 28MB limit
+    let totalBytes = 0;
     for (const f of filesArray) {
       const ext = '.' + f.name.split('.').pop().toLowerCase();
       if (!ALLOWED_EXTS.includes(ext)) {
@@ -160,15 +167,20 @@ export default function LossOfSpicApplication() {
         return;
       }
       if (f.size > MAX_FILE_SIZE) {
-        toast.error(`File "${f.name}" exceeds the 20MB limit.`);
+        toast.error(`File "${f.name}" (${(f.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 20MB limit.`);
         return;
       }
+      totalBytes += f.size;
+    }
+
+    if (totalBytes > MAX_BATCH_SIZE) {
+      toast.error(`The combined size of selected files (${(totalBytes / (1024 * 1024)).toFixed(1)} MB) exceeds the maximum batch limit of 28 MB. Please upload fewer or smaller files.`);
+      return;
     }
 
     setUploadingDoc(prev => ({ ...prev, [reqKey]: true }));
     const formData = new FormData();
     filesArray.forEach(f => formData.append('files[]', f));
-    formData.append('file', filesArray[0]);
     formData.append('doc_type', reqKey);
     formData.append('label', reqName);
     formData.append('requirement_name', reqName);
@@ -177,11 +189,16 @@ export default function LossOfSpicApplication() {
     try {
       const res = await api.post('/documents/upload', formData);
       const newDocs = res.data?.documents || (Array.isArray(res.data) ? res.data : [res.data]);
+      const acknowledgedCount = res.data?.count ?? (Array.isArray(res.data?.documents) ? res.data.documents.length : newDocs.length);
       setDocuments(prev => {
         const newIds = new Set(newDocs.map(d => d.id));
         return [...prev.filter(d => !newIds.has(d.id)), ...newDocs];
       });
-      toast.success(filesArray.length > 1 ? `${filesArray.length} attachments uploaded!` : `${reqName} uploaded successfully!`);
+      if (acknowledgedCount < filesArray.length) {
+        toast.warning(`${acknowledgedCount} of ${filesArray.length} files were acknowledged. Some files may not have been saved.`);
+      } else {
+        toast.success(filesArray.length > 1 ? `${filesArray.length} attachments uploaded!` : `${reqName} uploaded successfully!`);
+      }
     } catch (err) {
       toastError(err, 'Failed to upload document.');
       throw err;
