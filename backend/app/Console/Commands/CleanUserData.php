@@ -24,12 +24,48 @@ class CleanUserData extends Command
 
     public function handle()
     {
-        if (!$this->option('force') && !$this->confirm('This will wipe all applicant accounts, applications, and documents, but will PRESERVE all Solo Parent categories and requirements. Do you want to proceed?')) {
-            $this->info('Cleanup cancelled.');
-            return 0;
+        // 1. Production and staging environment prohibition
+        if (app()->environment('production', 'staging')) {
+            $this->error("Safety violation: Destructive test cleanup command 'portal:clean-user-data' is strictly prohibited in " . strtoupper(app()->environment()) . " environment.");
+            return 1;
         }
 
-        $this->info('Starting safe cleanup of user test data...');
+        // 2. Database connection and host verification
+        $defaultConn = config('database.default');
+        $connConfig = config("database.connections.{$defaultConn}", []);
+        $host = (string) ($connConfig['host'] ?? '');
+        $database = (string) ($connConfig['database'] ?? '');
+
+        $allowedLocalHosts = ['127.0.0.1', 'localhost', '::1', 'sqlite', ''];
+        if (!in_array(strtolower($host), $allowedLocalHosts, true)) {
+            $this->error("Safety violation: Destructive cleanup is strictly prohibited against non-local database host '{$host}'.");
+            return 1;
+        }
+
+        $prohibitedPatterns = ['supabase', 'amazonaws', 'rds', 'cloud', 'prod', 'production', 'pooler', 'stage', 'staging'];
+        foreach ($prohibitedPatterns as $pattern) {
+            if (str_contains(strtolower($host), $pattern) || str_contains(strtolower($database), $pattern)) {
+                $this->error("Safety violation: Database configuration matches prohibited remote/cloud pattern '{$pattern}'. Aborting.");
+                return 1;
+            }
+        }
+
+        // 3. Storage driver verification: must strictly be local or mock
+        $storage = app(\App\Services\SupabaseStorageService::class);
+        if (!$storage->isLocalDriver()) {
+            $this->error("Safety violation: Destructive test-data cleanup is strictly prohibited against remote storage driver '{$storage->getDriver()}'. Storage must be set to 'local' or 'mock'.");
+            return 1;
+        }
+
+        // 4. Interactive confirmation (cannot bypass environment safeguards)
+        if (!$this->option('force')) {
+            if (!$this->confirm("WARNING: This will wipe applicant accounts, applications, and documents from LOCAL test database '{$database}'. Categories, barangays, and admin accounts will be PRESERVED. Proceed?")) {
+                $this->info('Cleanup cancelled.');
+                return 0;
+            }
+        }
+
+        $this->info("Starting safe cleanup of user test data in local database '{$database}'...");
 
         DB::beginTransaction();
 
@@ -39,42 +75,24 @@ class CleanUserData extends Command
             Document::query()->delete();
             $this->line("  - Deleted {$docsCount} document records.");
 
-            // Purge file server objects in Supabase storage
-            $baseUrl = rtrim(config('services.supabase.url', env('SUPABASE_URL')), '/');
-            $serviceKey = config('services.supabase.service_key', env('SUPABASE_SERVICE_KEY'));
-            if ($baseUrl && $serviceKey) {
-                try {
-                    $client = \Illuminate\Support\Facades\Http::withoutVerifying()->withHeaders([
-                        'Authorization' => "Bearer {$serviceKey}",
-                    ]);
-                    $bucketsRes = $client->get("{$baseUrl}/storage/v1/bucket");
-                    if ($bucketsRes->successful()) {
-                        $buckets = $bucketsRes->json();
-                        $deletedFilesCount = 0;
-                        if (is_array($buckets)) {
-                            foreach ($buckets as $b) {
-                                $bId = $b['id'] ?? $b['name'];
-                                $filesRes = $client->post("{$baseUrl}/storage/v1/object/list/{$bId}", [
-                                    'prefix' => '',
-                                    'limit' => 100,
-                                ]);
-                                if ($filesRes->successful() && is_array($filesRes->json())) {
-                                    $names = array_filter(array_column($filesRes->json(), 'name'));
-                                    if (!empty($names)) {
-                                        $client->delete("{$baseUrl}/storage/v1/object/{$bId}", [
-                                            'prefixes' => array_values($names),
-                                        ]);
-                                        $deletedFilesCount += count($names);
-                                    }
-                                }
-                            }
-                        }
-                        $this->line("  - Cleared Supabase file server ({$deletedFilesCount} file(s) removed).");
+            // 2. Purge local mock storage only (zero cloud interaction)
+            $mockDir = $storage->getLocalStoragePath();
+            $deletedFilesCount = 0;
+            if (is_dir($mockDir)) {
+                $iterator = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($mockDir, \FilesystemIterator::SKIP_DOTS),
+                    \RecursiveIteratorIterator::CHILD_FIRST
+                );
+                foreach ($iterator as $item) {
+                    if ($item->isFile()) {
+                        @unlink($item->getPathname());
+                        $deletedFilesCount++;
+                    } elseif ($item->isDir()) {
+                        @rmdir($item->getPathname());
                     }
-                } catch (\Throwable $storageEx) {
-                    $this->warn("  ! Supabase storage notice: " . $storageEx->getMessage());
                 }
             }
+            $this->line("  - Cleared local mock storage ({$deletedFilesCount} file(s) removed).");
 
             if (\Illuminate\Support\Facades\Schema::hasTable('application_status_history')) {
                 $historyCount = DB::table('application_status_history')->count();
@@ -108,34 +126,43 @@ class CleanUserData extends Command
                 $this->line("  - Cleared {$tokensCount} personal access tokens.");
             }
 
-            // 2. Delete all non-super_admin accounts (including accounts with NULL email)
-            $nonAdminQuery = User::where(function ($q) {
-                $q->where('email', '!=', 'cswdd.admin1@butuan.gov.ph')
-                  ->orWhereNull('email');
-            })->where('role', '!=', 'super_admin');
+            // 3. Delete non-admin user accounts, strictly preserving ALL admin and super_admin accounts
+            $nonAdminQuery = User::whereNotIn('role', ['admin', 'super_admin'])
+                ->where(function ($q) {
+                    $q->where('email', '!=', 'cswdd.admin1@butuan.gov.ph')
+                      ->orWhereNull('email');
+                });
             
             $nonAdminCount = $nonAdminQuery->count();
             $nonAdminQuery->delete();
-            $this->line("  - Deleted {$nonAdminCount} non-super-admin user account(s).");
+            $this->line("  - Deleted {$nonAdminCount} non-admin user account(s).");
 
-            // 3. Ensure Super Admin account exists
-            User::updateOrCreate(
-                ['email' => 'cswdd.admin1@butuan.gov.ph'],
-                [
-                    'full_name' => 'Super Admin',
-                    'password_hash' => Hash::make('admin@CSWDD2026'),
-                    'role' => 'super_admin',
-                    'is_active' => true,
-                    'email_verified_at' => now(),
-                    'dpa_consented_at' => now(),
-                    'auth_provider' => 'local',
-                ]
-            );
-            $this->line("  - Verified Super Admin account (cswdd.admin1@butuan.gov.ph).");
+            // 4. Ensure Super Admin account exists WITHOUT overwriting any existing password
+            $superAdmin = User::where('role', 'super_admin')->first();
+            if (!$superAdmin) {
+                $seedPassword = env('SEED_ADMIN_PASSWORD');
+                if ($seedPassword) {
+                    User::create([
+                        'email' => 'cswdd.admin1@butuan.gov.ph',
+                        'full_name' => 'Super Admin',
+                        'password_hash' => Hash::make($seedPassword),
+                        'role' => 'super_admin',
+                        'is_active' => true,
+                        'email_verified_at' => now(),
+                        'dpa_consented_at' => now(),
+                        'auth_provider' => 'local',
+                    ]);
+                    $this->line("  - Seeded initial Super Admin account.");
+                } else {
+                    $this->warn("  ! No Super Admin found; create via 'php artisan db:seed' or configure SEED_ADMIN_PASSWORD.");
+                }
+            } else {
+                $this->line("  - Preserved existing Super Admin account ({$superAdmin->email}) without modifying credentials.");
+            }
 
             DB::commit();
 
-            // 4. Ensure reference data is preserved and intact
+            // 5. Ensure reference data is preserved and intact
             $categoryCount = Category::count();
             if ($categoryCount === 0) {
                 $this->warn('  ! Categories were empty, re-seeding now...');
@@ -145,7 +172,7 @@ class CleanUserData extends Command
 
             $reqsCount = DB::table('documentary_requirements')->count();
 
-            // 5. Clear application caches
+            // 6. Clear application caches
             Cache::flush();
 
             $this->newLine();

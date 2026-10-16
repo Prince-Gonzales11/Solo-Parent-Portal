@@ -47,7 +47,8 @@ return [
         'service_key' => env('SUPABASE_SERVICE_KEY'),
         'bucket' => env('AWS_BUCKET', 'solo-parent-portal-documents'),
         'temp_bucket' => env('SUPABASE_TEMP_BUCKET', 'solo-parent-temp'),
-        'ssl_verify' => env('SUPABASE_SSL_VERIFY', env('APP_ENV') === 'production'),
+        'ssl_verify' => env('SUPABASE_SSL_VERIFY', true),
+        'ca_bundle' => env('SUPABASE_CA_BUNDLE', storage_path('certificates/ca-bundle.crt')),
     ],
 
 ];

@@ -28,12 +28,26 @@ class SupabaseStorageService
         $this->localStoragePath = storage_path('app/mock_supabase');
         $this->baseUrl = rtrim((string) config('services.supabase.url', env('SUPABASE_URL', '')), '/');
         $this->serviceKey = (string) config('services.supabase.service_key', env('SUPABASE_SERVICE_KEY', ''));
-        $this->defaultBucket = config('services.supabase.bucket', env('AWS_BUCKET', 'solo-parent-documents'));
+        $this->defaultBucket = config('services.supabase.bucket', env('AWS_BUCKET', 'solo-parent-portal-documents'));
         $this->tempBucket = config('services.supabase.temp_bucket', env('SUPABASE_TEMP_BUCKET', 'solo-parent-temp'));
         
-        $sslVerify = config('services.supabase.ssl_verify', app()->environment('production'));
-        $caBundle = config('services.supabase.ca_bundle', storage_path('certificates/ca-bundle.crt'));
-        if ($sslVerify && file_exists($caBundle)) {
+        $sslVerify = config('services.supabase.ssl_verify', true);
+        $configuredCaBundle = config('services.supabase.ca_bundle', env('SUPABASE_CA_BUNDLE'));
+        $defaultCaBundle = storage_path('certificates/ca-bundle.crt');
+        $caBundle = $configuredCaBundle ?: (file_exists($defaultCaBundle) ? $defaultCaBundle : null);
+
+        // Security requirement: Production and staging cloud requests must fail closed if certificate validation cannot be performed
+        if (!$this->isLocalDriver()) {
+            if (app()->environment('production', 'staging') && $sslVerify === false) {
+                throw new \DomainException("Disabling TLS/SSL certificate verification is strictly prohibited in production and staging environments.");
+            }
+
+            if ($sslVerify && $configuredCaBundle && !file_exists($configuredCaBundle)) {
+                throw new \DomainException("Configured Supabase CA certificate bundle does not exist: {$configuredCaBundle}");
+            }
+        }
+
+        if ($sslVerify && $caBundle && file_exists($caBundle)) {
             $this->verifySsl = $caBundle;
         } else {
             $this->verifySsl = (bool) $sslVerify;
@@ -43,6 +57,44 @@ class SupabaseStorageService
     public function isLocalDriver(): bool
     {
         return $this->driver === 'local' || $this->driver === 'mock';
+    }
+
+    /**
+     * @return bool|string
+     */
+    public function getVerifySsl()
+    {
+        return $this->verifySsl;
+    }
+
+    public function getDriver(): string
+    {
+        return $this->driver;
+    }
+
+    public function getLocalStoragePath(): string
+    {
+        return $this->localStoragePath;
+    }
+
+    public function getDefaultBucket(): string
+    {
+        return $this->defaultBucket;
+    }
+
+    public function getTempBucket(): string
+    {
+        return $this->tempBucket;
+    }
+
+    public function getBaseUrl(): string
+    {
+        return $this->baseUrl;
+    }
+
+    public function getServiceKey(): string
+    {
+        return $this->serviceKey;
     }
 
     /**
@@ -134,6 +186,45 @@ class SupabaseStorageService
     }
 
     /**
+     * Safely encode an object path for use in Supabase Storage REST URLs.
+     * Validates against directory traversal and null bytes.
+     * Encodes each path segment individually via rawurlencode to preserve directory
+     * slashes while safely escaping spaces, commas, parentheses, accented, and multibyte characters.
+     *
+     * @param string $path
+     * @return string
+     * @throws \InvalidArgumentException
+     */
+    public static function encodeStoragePath(string $path): string
+    {
+        if (str_contains($path, "\0")) {
+            throw new \InvalidArgumentException("Null byte detected in storage path.");
+        }
+
+        $normalized = str_replace('\\', '/', $path);
+        if (preg_match('/^[a-zA-Z]:/', $path) || str_starts_with($normalized, '/') || str_starts_with($path, '\\')) {
+            throw new \InvalidArgumentException("Absolute paths are not permitted in storage operations: {$path}");
+        }
+
+        $cleanPath = trim($normalized, '/');
+        if ($cleanPath === '') {
+            throw new \InvalidArgumentException("Storage path cannot be empty.");
+        }
+
+        $segments = explode('/', $cleanPath);
+        $encodedSegments = [];
+        foreach ($segments as $segment) {
+            $trimmed = trim($segment);
+            if ($trimmed === '' || $trimmed === '.' || $trimmed === '..') {
+                throw new \InvalidArgumentException("Directory traversal or empty segment detected in storage path: {$path}");
+            }
+            $encodedSegments[] = rawurlencode($trimmed);
+        }
+
+        return implode('/', $encodedSegments);
+    }
+
+    /**
      * Upload a file to Supabase Storage.
      *
      * @param string $path      Object path within the bucket (e.g. "applications/uuid/file.pdf")
@@ -164,7 +255,7 @@ class SupabaseStorageService
         $this->ensureLiveConfigured();
 
         $encodedBucket = rawurlencode($bucket);
-        $encodedPath = implode('/', array_map('rawurlencode', explode('/', $path)));
+        $encodedPath = self::encodeStoragePath($path);
         $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}/{$encodedPath}";
 
         $response = Http::withOptions(['verify' => $this->verifySsl])
@@ -177,11 +268,11 @@ class SupabaseStorageService
             ->post($url);
 
         if (!$response->successful()) {
-            $body = $response->body();
+            $body = self::sanitizeResponseBody($response->body());
             Log::error('Supabase Storage upload failed', [
                 'status' => $response->status(),
                 'body'   => $body,
-                'path'   => $path,
+                'path'   => self::sanitizeLogPath($path),
                 'bucket' => $bucket,
             ]);
             throw new \RuntimeException("Failed to upload file to storage: {$body}");
@@ -222,9 +313,8 @@ class SupabaseStorageService
         $this->ensureLiveConfigured();
 
         $encodedBucket = rawurlencode($bucket);
-        // Pass path directly without rawurlencoding commas/symbols which break Supabase signature verification
-        $cleanPath = ltrim($path, '/');
-        $url = "{$this->baseUrl}/storage/v1/object/sign/{$encodedBucket}/{$cleanPath}";
+        $encodedPath = self::encodeStoragePath($path);
+        $url = "{$this->baseUrl}/storage/v1/object/sign/{$encodedBucket}/{$encodedPath}";
 
         $response = Http::withOptions(['verify' => $this->verifySsl])
             ->withHeaders([
@@ -236,8 +326,8 @@ class SupabaseStorageService
         if (!$response->successful()) {
             Log::error('Supabase Storage signed URL failed', [
                 'status' => $response->status(),
-                'body'   => $response->body(),
-                'path'   => $path,
+                'body'   => self::sanitizeResponseBody($response->body()),
+                'path'   => self::sanitizeLogPath($path),
             ]);
             throw new \RuntimeException("Failed to generate signed URL");
         }
@@ -249,7 +339,10 @@ class SupabaseStorageService
 
         // Supabase returns signed URL with literal spaces: "/object/sign/.../New Documents/..."
         // Encode spaces to %20 so that browser GET requests match the token signature.
-        $safeSignedPath = str_replace(' ', '%20', $signedPath);
+        $parts = explode('?', $signedPath, 2);
+        $pathPart = $parts[0];
+        $queryPart = isset($parts[1]) ? '?' . $parts[1] : '';
+        $safeSignedPath = str_replace(' ', '%20', $pathPart) . $queryPart;
 
         return $this->baseUrl . '/storage/v1' . $safeSignedPath;
     }
@@ -277,8 +370,8 @@ class SupabaseStorageService
         $this->ensureLiveConfigured();
 
         $encodedBucket = rawurlencode($bucket);
-        $cleanPath = ltrim($path, '/');
-        $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}/" . str_replace(' ', '%20', $cleanPath);
+        $encodedPath = self::encodeStoragePath($path);
+        $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}/{$encodedPath}";
 
         $response = Http::withOptions(['verify' => $this->verifySsl])
             ->withHeaders([
@@ -287,6 +380,10 @@ class SupabaseStorageService
             ->get($url);
 
         if (!$response->successful()) {
+            Log::error('Supabase Storage download failed', [
+                'status' => $response->status(),
+                'path'   => self::sanitizeLogPath($path),
+            ]);
             throw new \RuntimeException("Failed to download file from storage: " . $response->status());
         }
 
@@ -321,6 +418,12 @@ class SupabaseStorageService
 
         $this->ensureLiveConfigured();
 
+        $cleanFrom = trim(str_replace('\\', '/', $fromPath), '/');
+        $cleanTo = trim(str_replace('\\', '/', $toPath), '/');
+        if (str_contains($cleanFrom, "\0") || str_contains($cleanFrom, '..') || str_contains($cleanTo, "\0") || str_contains($cleanTo, '..')) {
+            throw new \InvalidArgumentException("Directory traversal or null byte detected in storage move operation.");
+        }
+
         $url = "{$this->baseUrl}/storage/v1/object/move";
 
         $response = Http::withOptions(['verify' => $this->verifySsl])
@@ -330,18 +433,19 @@ class SupabaseStorageService
             ])
             ->post($url, [
                 'bucketId'       => $bucket,
-                'sourceKey'      => $fromPath,
-                'destinationKey' => $toPath,
+                'sourceKey'      => $cleanFrom,
+                'destinationKey' => $cleanTo,
             ]);
 
         if (!$response->successful()) {
+            $body = self::sanitizeResponseBody($response->body());
             Log::error('Supabase Storage move failed', [
                 'status' => $response->status(),
-                'body'   => $response->body(),
-                'from'   => $fromPath,
-                'to'     => $toPath,
+                'body'   => $body,
+                'from'   => self::sanitizeLogPath($fromPath),
+                'to'     => self::sanitizeLogPath($toPath),
             ]);
-            throw new \RuntimeException("Failed to move file in storage: {$response->body()}");
+            throw new \RuntimeException("Failed to move file in storage: {$body}");
         }
 
         return true;
@@ -368,6 +472,11 @@ class SupabaseStorageService
 
         $this->ensureLiveConfigured();
 
+        $cleanPath = trim(str_replace('\\', '/', $path), '/');
+        if (str_contains($cleanPath, "\0") || str_contains($cleanPath, '..')) {
+            throw new \InvalidArgumentException("Directory traversal or null byte detected in storage delete operation.");
+        }
+
         $encodedBucket = rawurlencode($bucket);
         $url = "{$this->baseUrl}/storage/v1/object/{$encodedBucket}";
 
@@ -376,13 +485,13 @@ class SupabaseStorageService
                 'Authorization' => "Bearer {$this->serviceKey}",
                 'Content-Type'  => 'application/json',
             ])
-            ->delete($url, ['prefixes' => [$path]]);
+            ->delete($url, ['prefixes' => [$cleanPath]]);
 
         if (!$response->successful()) {
             Log::warning('Supabase Storage delete failed', [
                 'status' => $response->status(),
-                'body'   => $response->body(),
-                'path'   => $path,
+                'body'   => self::sanitizeResponseBody($response->body()),
+                'path'   => self::sanitizeLogPath($path),
             ]);
             return false;
         }
@@ -457,17 +566,22 @@ class SupabaseStorageService
             // 2. Upload to permanent bucket
             $this->upload($permanentPath, $contents, $mimeType);
             
-            // 3. Verify permanent upload by generating signed URL or reading metadata (we assume upload throws on failure)
-            
-            // 4. Delete from temporary bucket
-            $this->deleteTemporary($tempPath);
+            // 3. Delete from temporary bucket
+            $deleted = $this->deleteTemporary($tempPath);
+            if (!$deleted) {
+                Log::warning('Temporary file deletion failed during promotion; temp object will be pruned by storage:clean-temp', [
+                    'temp_path'      => self::sanitizeLogPath($tempPath),
+                    'permanent_path' => self::sanitizeLogPath($permanentPath),
+                ]);
+            }
             
             return $permanentPath;
         } catch (\Exception $e) {
+            $sanitizedError = self::sanitizePromotionError($e->getMessage());
             Log::error('Failed to promote document to permanent storage', [
-                'temp_path' => $tempPath,
-                'permanent_path' => $permanentPath,
-                'error' => $e->getMessage()
+                'temp_path'      => self::sanitizeLogPath($tempPath),
+                'permanent_path' => self::sanitizeLogPath($permanentPath),
+                'error'          => $sanitizedError,
             ]);
             throw $e;
         }
@@ -526,7 +640,7 @@ class SupabaseStorageService
 
             Log::warning("Promotion failed for document {$doc->id}", [
                 'doc_id'      => $doc->id,
-                'source_path' => $sourcePath,
+                'source_path' => self::sanitizeLogPath($sourcePath),
                 'error'       => $sanitizedError
             ]);
 
@@ -546,15 +660,39 @@ class SupabaseStorageService
     public static function sanitizePromotionError(string $rawError): string
     {
         // Redact Bearer / JWT tokens
-        $sanitized = preg_replace('/Bearer\s+[A-Za-z0-9\-\._~+\/]+=*/i', 'Bearer [REDACTED]', $rawError);
-        // Redact apikey or service keys or signatures in query strings
-        $sanitized = preg_replace('/(apikey|service_key|api_key|token|signature|secret|password)=([^&\s]+)/i', '$1=[REDACTED]', $sanitized);
+        $sanitized = preg_replace('#Bearer\s+[A-Za-z0-9\-\._~+/]+=*#i', 'Bearer [REDACTED]', $rawError);
+        // Redact apikey or service keys or signatures in query strings or config
+        $sanitized = preg_replace('#(apikey|service_key|api_key|token|signature|secret|password)=([^&\s]+)#i', '$1=[REDACTED]', $sanitized);
         // Redact Authorization headers
-        $sanitized = preg_replace('/Authorization:\s*[^\r\n]+/i', 'Authorization: [REDACTED]', $sanitized);
+        $sanitized = preg_replace('#Authorization:\s*[^\r\n]+#i', 'Authorization: [REDACTED]', $sanitized);
         // Redact URLs with query parameters that may contain signed tokens
-        $sanitized = preg_replace('/(\/object\/sign\/[^\s\?]+)\?[^\s]+/i', '$1?[REDACTED_PARAMS]', $sanitized);
-        
+        $sanitized = preg_replace('#(/object/sign/[^\s?]+)\?[^\s]+#i', '$1?[REDACTED_PARAMS]', $sanitized);
+        // Redact standalone JWTs (three base64url segments separated by dots)
+        $sanitized = preg_replace('#eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_.+/=]*#', '[REDACTED_JWT]', $sanitized);
+
         return substr(trim($sanitized), 0, 500);
+    }
+
+    /**
+     * Sanitize response bodies returned by Supabase Storage or CDN proxies.
+     */
+    public static function sanitizeResponseBody(?string $body): string
+    {
+        if ($body === null || $body === '') {
+            return '';
+        }
+        return self::sanitizePromotionError($body);
+    }
+
+    /**
+     * Sanitize object paths in logs to avoid unnecessary PII exposure while preserving diagnostics.
+     */
+    public static function sanitizeLogPath(string $path): string
+    {
+        $normalized = str_replace('\\', '/', $path);
+        // Mask applicant folder name: Applicants/LastName., FirstName, MI/ -> Applicants/[APPLICANT_FOLDER]/
+        $sanitized = preg_replace('#^Applicants/[^/]+/#i', 'Applicants/[APPLICANT_FOLDER]/', $normalized);
+        return self::sanitizePromotionError($sanitized);
     }
 }
 

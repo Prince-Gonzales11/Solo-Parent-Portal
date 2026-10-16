@@ -1300,29 +1300,9 @@ class ApplicationController extends Controller
                 ->where('storage_status', 'temporary')
                 ->get();
             if ($tempDocs->isNotEmpty()) {
-                $storage = new \App\Services\SupabaseStorageService();
+                $storage = app(\App\Services\SupabaseStorageService::class);
                 foreach ($tempDocs as $doc) {
-                    try {
-                        $doc->loadMissing('application', 'requirement');
-                        $appType = $doc->application->application_type ?? 'new_id';
-                        $refNo = $doc->application->reference_no ?? 'UNKNOWN';
-                        $reqName = $doc->requirement->name ?? 'Document';
-                        
-                        $filename = basename($doc->temporary_storage_path ?? $doc->storage_path);
-                        $permanentPath = \App\Services\StoragePathBuilder::buildPermanentPath($doc->user_id, $appType, $refNo, $reqName, $filename);
-                        
-                        $storage->promoteToPermanent($doc->temporary_storage_path ?? $doc->storage_path, $permanentPath, $doc->mime_type);
-                        
-                        $doc->update([
-                            'permanent_storage_path' => $permanentPath,
-                            'storage_status' => 'promoted',
-                            'promoted_at' => now(),
-                        ]);
-                    } catch (\Throwable $e) {
-                        Log::warning("Non-blocking failure to promote document {$doc->id} during status transition", [
-                            'error' => $e->getMessage()
-                        ]);
-                    }
+                    $storage->promoteDocumentRecord($doc);
                 }
             }
         }
