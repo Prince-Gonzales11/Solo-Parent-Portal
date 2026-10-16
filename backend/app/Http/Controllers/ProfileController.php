@@ -165,18 +165,12 @@ class ProfileController extends Controller
             $user->update($userUpdates);
         }
 
-        // 2. Update ApplicationForm
+        // 2. Update ApplicationForm only for editable applications (QA-P1-06: protect completed/finalized records from mutation)
+        $editableStatuses = ['draft', 'requirements_submitted', 'qualified', 'for_document_correction'];
         $activeApp = \App\Models\Application::where('user_id', $user->id)
-            ->whereNotIn('status', ['rejected', 'expired', 'released', 'cancelled'])
+            ->whereIn('status', $editableStatuses)
+            ->latest()
             ->first();
-
-        // If no active draft application exists, find latest user application if one already exists
-        if (!$activeApp && $user->role === 'applicant') {
-            $latestApp = \App\Models\Application::where('user_id', $user->id)->latest()->first();
-            if ($latestApp && !in_array($latestApp->status, ['rejected', 'cancelled'])) {
-                $activeApp = $latestApp;
-            }
-        }
 
         if ($activeApp) {
             if (isset($validated['solo_parent_category'])) {
@@ -412,6 +406,12 @@ class ProfileController extends Controller
         $user->update([
             'password_hash' => Hash::make($request->new_password),
         ]);
+
+        // QA-P2-01: Revoke all other active sessions upon password change
+        $currentToken = $user->currentAccessToken();
+        if ($currentToken instanceof \Laravel\Sanctum\PersonalAccessToken) {
+            $user->tokens()->where('id', '!=', $currentToken->id)->delete();
+        }
 
         return response()->json([
             'message' => 'Password updated successfully.',

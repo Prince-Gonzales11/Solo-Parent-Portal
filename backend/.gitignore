@@ -3,6 +3,11 @@
 .env
 .env.backup
 .env.production
+.env.testing
+.env.*
+phpunit.pgsql.xml
+phpunit.phase4b.xml
+!.env.example
 .phpactor.json
 .phpunit.result.cache
 /.codex

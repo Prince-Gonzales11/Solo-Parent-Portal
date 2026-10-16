@@ -7,6 +7,7 @@ use App\Models\Application;
 use App\Models\AuditLog;
 use App\Models\Category;
 use App\Models\Document;
+use App\Models\DocumentaryRequirement;
 use App\Models\Notification;
 use App\Services\SupabaseStorageService;
 use App\Services\StoragePathBuilder;
@@ -31,6 +32,8 @@ class DocumentController extends Controller
     const ALLOWED_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png', 'docx', 'doc'];
 
     const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+    const MAX_FILES_PER_BATCH = 10;
+    const MAX_BATCH_SIZE = 28 * 1024 * 1024; // 28MB (conservative limit under PHP post_max_size 35M)
 
     // Magic bytes for file signature validation
     const MAGIC_BYTES = [
@@ -140,7 +143,7 @@ class DocumentController extends Controller
     {
         $request->validate([
             'file'              => 'nullable|file|max:20480', // 20MB
-            'files'             => 'nullable|array',
+            'files'             => 'nullable|array|max:' . self::MAX_FILES_PER_BATCH,
             'files.*'           => 'file|max:20480',
             'doc_type'          => 'required|string|max:120',
             'requirement_id'    => 'nullable|string',
@@ -165,6 +168,25 @@ class DocumentController extends Controller
             return response()->json(['detail' => 'Please select at least one file to upload.'], 422);
         }
 
+        // ── Enforce batch attachment count limit (prevents silent truncation) ─
+        if (count($uploadedFiles) > self::MAX_FILES_PER_BATCH) {
+            return response()->json([
+                'detail' => 'You may upload a maximum of ' . self::MAX_FILES_PER_BATCH . ' files per batch. Please upload additional documents in subsequent batches.',
+            ], 422);
+        }
+
+        // ── Enforce total request size limit (conservative 28MB limit for 35M post_max_size) ─
+        $totalBatchBytes = 0;
+        foreach ($uploadedFiles as $f) {
+            $totalBatchBytes += $f->getSize();
+        }
+        if ($totalBatchBytes > self::MAX_BATCH_SIZE) {
+            $formattedMb = round($totalBatchBytes / (1024 * 1024), 1);
+            return response()->json([
+                'detail' => "The combined size of all uploaded files in this batch ({$formattedMb} MB) exceeds the maximum allowed batch size of 28 MB. Please select fewer or smaller files.",
+            ], 422);
+        }
+
         // ── Pre-validate all files upfront ────────────────────────────
         foreach ($uploadedFiles as $idx => $f) {
             $validationError = $this->validateFile($f);
@@ -179,9 +201,9 @@ class DocumentController extends Controller
         // ── Resolve application ───────────────────────────────────────
         $applicationId = $request->application_id;
         if (!$applicationId) {
-            // Try to find user's current active application
+            // Try to find user's current editable application
             $app = Application::where('user_id', $user->id)
-                ->whereNotIn('status', ['rejected', 'expired'])
+                ->whereIn('status', ['draft', 'requirements_submitted', 'qualified', 'for_document_correction'])
                 ->orderBy('created_at', 'desc')
                 ->first();
             $applicationId = $app?->id;
@@ -195,8 +217,16 @@ class DocumentController extends Controller
             }
         }
 
-        if (!$applicationId) {
+        if (!$applicationId || !$app) {
             return response()->json(['detail' => 'You must start an application before uploading documents.'], 400);
+        }
+
+        // QA-P1-07: Enforce application lifecycle state - reject uploads on finalized/approved records
+        $immutableStatuses = ['approved', 'ready_for_pickup', 'claimed', 'released', 'completed'];
+        if (in_array($app->status, $immutableStatuses)) {
+            return response()->json([
+                'detail' => "This application is currently in '{$app->status}' status and cannot accept new document uploads.",
+            ], 422);
         }
 
         // ── Resolve requirement id ───────────────────────────────────────────
@@ -240,6 +270,22 @@ class DocumentController extends Controller
 
         if (!$requirementId) {
             return response()->json(['detail' => 'Invalid document type or requirement not found.'], 400);
+        }
+
+        // QA-P2-05: Verify that the resolved requirement belongs to this application's category or is general
+        if ($app->category_id) {
+            $isValidReq = DocumentaryRequirement::where('id', $requirementId)
+                ->where(function ($query) use ($app) {
+                    $query->where('category_id', $app->category_id)
+                          ->orWhereNull('category_id');
+                })
+                ->exists();
+
+            if (!$isValidReq) {
+                return response()->json([
+                    'detail' => 'The specified documentary requirement does not belong to this application category.',
+                ], 422);
+            }
         }
 
         // ── Duplicate file prevention (exact same filename + size under same requirement) ───
@@ -367,6 +413,14 @@ class DocumentController extends Controller
         }
         if ($oldDoc->user_id !== $user->id) {
             return response()->json(['detail' => 'Unauthorized action.'], 403);
+        }
+
+        // QA-P1-07: Reject replacement if application has reached finalized status
+        $app = $oldDoc->application;
+        if ($app && in_array($app->status, ['approved', 'ready_for_pickup', 'claimed', 'released', 'completed'])) {
+            return response()->json([
+                'detail' => "Cannot replace documents for an application in '{$app->status}' status.",
+            ], 422);
         }
 
         // Prevent replacement only if document has already been verified/approved or is currently under official review
@@ -509,7 +563,9 @@ class DocumentController extends Controller
 
             $path = $doc->active_storage_path;
             
-            if ($doc->storage_status === 'promoted') {
+            if ($storage->isLocalDriver()) {
+                $url = url("/api/documents/{$id}/preview");
+            } elseif ($doc->storage_status === 'promoted') {
                 $url = $storage->getSignedUrl($path, 900);
             } else {
                 $url = $storage->getTemporarySignedUrl($path, 900);
@@ -582,6 +638,14 @@ class DocumentController extends Controller
         }
         if ($doc->user_id !== $request->user()->id) {
             return response()->json(['detail' => 'Unauthorized action.'], 403);
+        }
+
+        // QA-P1-07: Reject deletion if application is finalized
+        $app = $doc->application;
+        if ($app && in_array($app->status, ['approved', 'ready_for_pickup', 'claimed', 'released', 'completed'])) {
+            return response()->json([
+                'detail' => "Cannot delete documents from an application that is in '{$app->status}' status.",
+            ], 422);
         }
 
         // Only allow deletion of submitted/pending documents (not approved/under_review)
@@ -712,7 +776,9 @@ class DocumentController extends Controller
 
             $path = $doc->active_storage_path;
             
-            if ($doc->storage_status === 'promoted') {
+            if ($storage->isLocalDriver()) {
+                $url = url("/api/admin/documents/{$id}/preview");
+            } elseif ($doc->storage_status === 'promoted') {
                 $url = $storage->getSignedUrl($path, 900);
             } else {
                 $url = $storage->getTemporarySignedUrl($path, 900);

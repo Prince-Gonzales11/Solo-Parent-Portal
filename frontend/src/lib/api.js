@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 // Dynamically resolves API base URL so the portal works on localhost,
 // LAN (e.g. mobile devices on local Wi-Fi), and production seamlessly.
 export function getBaseURL() {
-  const envUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000/api';
+  const envUrl = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL) || 'http://localhost:8000/api';
   if (typeof window !== 'undefined' && window.location) {
     const { hostname, protocol } = window.location;
     // When accessed from a mobile device or other computer on the LAN (not loopback)
@@ -38,19 +38,22 @@ const LONG_CACHE_TTL = 180000;   // 3 minutes for static reference data
 
 export function clearApiCache() {
   cache.clear();
+  inFlight.clear();
 }
 
 // Wrap api.get with intelligent caching & deduplication
 const originalGet = api.get.bind(api);
 api.get = function (url, config = {}) {
-  // If explicitly disabled or non-cacheable
-  if (config.cache === false || config.params?.refresh) {
+  // If explicitly disabled, non-cacheable, or binary blob
+  if (config.cache === false || config.params?.refresh || config.responseType === 'blob') {
     return originalGet(url, config);
   }
 
-  // Construct cache key including params
+  // QA-P2-04: Construct cache key scoped to current session token to prevent cross-account cache bleed
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+  const authScope = token ? token.slice(-16) : 'anon';
   const paramKey = config.params ? JSON.stringify(config.params) : '';
-  const cacheKey = `${url}?${paramKey}`;
+  const cacheKey = `${authScope}:${url}?${paramKey}`;
   const now = Date.now();
 
   // Check valid cache entry
@@ -121,7 +124,7 @@ const ERROR_MAP = [
   // Auth – Already registered
   { match: /already exists|already registered|duplicate/i, message: 'An account with this email address already exists. Please sign in instead.' },
   // Token / Session
-  { match: /could not validate|token.*expired|session.*expired|unauthorized/i, message: 'Your session has expired. Please sign in again.' },
+  { match: /could not validate|token.*expired|session.*expired/i, message: 'Your session has expired. Please sign in again.' },
   // File upload
   { match: /file too large|file size/i,        message: 'The file you uploaded is too large. Please upload a file under 10 MB.' },
   { match: /file type|unsupported|invalid.*type/i, message: 'This file type is not accepted. Please upload a PDF, JPG, or PNG file.' },
@@ -157,34 +160,72 @@ export function getErrorMessage(error, fallback = 'An unexpected error occurred.
   }
 
   const status = error.response?.status;
-  const raw = error.response?.data?.detail;
+  const data = error.response?.data;
 
-  // Normalise: detail can be a string, an array of objects (422), or an object
+  // 1. Check for Laravel validation error bag: { errors: { field: ["msg1", "msg2"] } }
+  if (data?.errors && typeof data.errors === 'object') {
+    const fieldMessages = Object.values(data.errors).flat().filter(Boolean);
+    if (fieldMessages.length > 0) {
+      return fieldMessages.join(' ');
+    }
+  }
+
+  // 2. Normalise detail or message
+  const raw = data?.detail ?? data?.message;
   let detail = '';
   if (typeof raw === 'string') {
-    detail = raw;
+    detail = raw.trim();
   } else if (Array.isArray(raw)) {
-    // FastAPI 422 Unprocessable Entity – join field messages
-    detail = raw.map(e => e.msg || JSON.stringify(e)).join('; ');
+    // 422 Unprocessable Entity – join field messages
+    detail = raw.map(e => e.msg || (typeof e === 'string' ? e : JSON.stringify(e))).join('; ');
   } else if (raw && typeof raw === 'object') {
     detail = JSON.stringify(raw);
   }
 
-  // Try matching against our friendly map first
+  // 3. Status-specific semantic handling before generic matching
+  if (status === 403) {
+    if (/deactivated|disabled|suspended/i.test(detail)) {
+      return 'This account has been deactivated. Please contact the CSWDD office for assistance.';
+    }
+    if (/email.*not.*verified|verify.*email/i.test(detail)) {
+      return 'Please verify your email address before signing in.';
+    }
+    // Clean up backend detail if present and specific (e.g. "Unauthorized. Only super administrators can...")
+    if (detail) {
+      const cleaned = detail.replace(/^unauthorized\.?\s*/i, '').trim();
+      if (cleaned) {
+        return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+      }
+    }
+    return 'You do not have permission to perform this action.';
+  }
+
+  if (status === 401) {
+    if (/invalid (email|credentials|password)|could not find/i.test(detail)) {
+      return detail || 'Invalid email, mobile number, or password.';
+    }
+    if (/token.*(expired|revoked|invalid)|session.*expired/i.test(detail)) {
+      return 'Your session has expired. Please sign in again.';
+    }
+    if (detail && !/unauthorized/i.test(detail)) {
+      return detail.charAt(0).toUpperCase() + detail.slice(1);
+    }
+    return 'Your session has expired or you are not signed in. Please sign in to continue.';
+  }
+
+  // 4. Try matching against our friendly map
   const combined = `${detail} ${status}`;
   for (const rule of ERROR_MAP) {
     if (rule.match.test(combined)) return rule.message;
   }
 
-  // If we have a raw detail message, clean it up and return it
+  // 5. If we have a raw detail message, clean it up and return it
   if (detail) {
     return detail.charAt(0).toUpperCase() + detail.slice(1);
   }
 
-  // HTTP status fallbacks
+  // 6. HTTP status fallbacks
   if (status === 400) return 'The information submitted is invalid. Please review and try again.';
-  if (status === 401) return 'Please sign in to continue.';
-  if (status === 403) return 'You do not have permission to perform this action.';
   if (status === 404) return 'The item you are looking for was not found.';
   if (status === 409) return 'A conflict occurred. This item may already exist.';
   if (status === 422) return 'Some fields are invalid. Please review your input and try again.';
@@ -231,6 +272,86 @@ export async function logoutUser() {
   } catch {}
   clearAuthSession();
   window.location.href = '/login';
+}
+
+// ─── Authenticated Document Preview Helper ──────────────────────────────────
+// Active blob URL registry for managed lifecycle and clean-up
+const activeBlobRegistry = new Set();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    activeBlobRegistry.forEach(url => {
+      try { URL.revokeObjectURL(url); } catch {}
+    });
+    activeBlobRegistry.clear();
+  });
+}
+
+/**
+ * Opens an authenticated document preview safely in a new browser tab or provided window reference
+ * using URL.createObjectURL() on a fetched Blob.
+ *
+ * Never passes account-level Sanctum tokens in URL query strings.
+ * Keeps the Blob URL active while the preview tab is open so printing and downloading succeed,
+ * and immediately revokes it when the tab is closed.
+ *
+ * @param {string} docId - The UUID of the document
+ * @param {Object} [options]
+ * @param {boolean} [options.isAdmin=false] - Whether to use the admin document preview endpoint
+ * @param {Window|null} [options.newTab=null] - Pre-opened window reference to avoid popup blockers
+ * @returns {Promise<string>} The temporary blob URL
+ */
+export async function previewDocumentBlob(docId, { isAdmin = false, newTab = null } = {}) {
+  const targetWindow = newTab || (typeof window !== 'undefined' ? window.open('about:blank', '_blank') : null);
+  try {
+    const endpoint = isAdmin ? `/admin/documents/${docId}/preview` : `/documents/${docId}/preview`;
+    const res = await api.get(endpoint, {
+      cache: false,
+      responseType: 'blob',
+    });
+
+    const contentType = res.headers?.['content-type'] || 'application/pdf';
+    const blob = new Blob([res.data], { type: contentType });
+    const blobUrl = URL.createObjectURL(blob);
+
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.location.href = blobUrl;
+    } else if (typeof window !== 'undefined') {
+      window.open(blobUrl, '_blank', 'noopener,noreferrer');
+    }
+
+    activeBlobRegistry.add(blobUrl);
+
+    const cleanup = () => {
+      try { URL.revokeObjectURL(blobUrl); } catch {}
+      activeBlobRegistry.delete(blobUrl);
+      if (pollTimer) clearInterval(pollTimer);
+    };
+
+    // Monitor preview tab: revoke immediately when the user closes the preview tab
+    let pollTimer = null;
+    if (targetWindow) {
+      pollTimer = setInterval(() => {
+        try {
+          if (!targetWindow || targetWindow.closed) {
+            cleanup();
+          }
+        } catch {
+          cleanup();
+        }
+      }, 2000);
+    }
+
+    // Safety backstop: 30-minute fallback ensures long documents can be viewed/printed without premature revocation
+    setTimeout(cleanup, 1800000);
+
+    return blobUrl;
+  } catch (err) {
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.close();
+    }
+    throw err;
+  }
 }
 
 // ─── Response Interceptor ─────────────────────────────────────────────────────

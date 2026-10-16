@@ -84,31 +84,18 @@ class GoogleAuthController extends Controller
             // Allow clock skew to avoid "Cannot handle token with iat prior to..." errors
             \Firebase\JWT\JWT::$leeway = 300; // 5 minutes leeway
 
-            // Get user info from the ID token
+            // Get user info from the ID token (strict cryptographic verification)
             $payload = null;
             try {
                 $payload = $client->verifyIdToken($tokenData['id_token']);
             } catch (\Exception $verifyEx) {
-                Log::warning('Google verifyIdToken failed, attempting fallback payload decode', [
+                Log::error('Google verifyIdToken failed', [
                     'error' => $verifyEx->getMessage(),
                 ]);
             }
 
-            // Fallback: If verifyIdToken returned false or threw, decode the token payload directly
-            // (Safe because token was received directly from Google's token endpoint over TLS with client_secret)
-            if (!$payload && !empty($tokenData['id_token'])) {
-                $jwtParts = explode('.', $tokenData['id_token']);
-                if (count($jwtParts) >= 2) {
-                    $decoded = json_decode(base64_decode(strtr($jwtParts[1], '-_', '+/')), true);
-                    if (!empty($decoded['sub']) && !empty($decoded['email'])) {
-                        $payload = $decoded;
-                        Log::info('Successfully decoded Google ID token via secure fallback');
-                    }
-                }
-            }
-
             if (!$payload) {
-                Log::error('Invalid Google ID token received', ['has_id_token' => !empty($tokenData['id_token'])]);
+                Log::error('Invalid or unverified Google ID token received', ['has_id_token' => !empty($tokenData['id_token'])]);
                 return redirect($frontendUrl . '/login?error=invalid_token');
             }
 
@@ -128,13 +115,17 @@ class GoogleAuthController extends Controller
                 $user = User::where('email', $email)->first();
 
                 if ($user) {
-                    // Link Google account to existing user
+                    // Security check: Never bypass administrative suspension via OAuth linking
+                    if (!$user->is_active) {
+                        return redirect($frontendUrl . '/login?error=account_inactive');
+                    }
+
+                    // Link Google account to existing user without overriding active status
                     $user->update([
                         'google_id' => $googleId,
                         'auth_provider' => 'google',
                         'picture' => $picture ?? $user->picture,
                         'email_verified_at' => $user->email_verified_at ?? now(),
-                        'is_active' => true,
                     ]);
                 } else {
                     // Create new user — Google-authenticated users are verified by Google

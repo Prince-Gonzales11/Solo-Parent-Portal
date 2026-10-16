@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { api, toastError } from '@/lib/api';
+import { api, toastError, previewDocumentBlob } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -158,6 +158,13 @@ export default function RenewApplication() {
     const filesArray = Array.isArray(files) ? files : [files];
     if (filesArray.length === 0) return;
 
+    if (filesArray.length > 10) {
+      toast.error('You may upload a maximum of 10 files per batch. Please upload additional documents in subsequent batches.');
+      return;
+    }
+
+    const MAX_BATCH_SIZE = 28 * 1024 * 1024; // 28MB limit
+    let totalBytes = 0;
     for (const f of filesArray) {
       const ext = '.' + f.name.split('.').pop().toLowerCase();
       if (!ALLOWED_EXTS.includes(ext)) {
@@ -165,15 +172,20 @@ export default function RenewApplication() {
         return;
       }
       if (f.size > MAX_FILE_SIZE) {
-        toast.error(`File "${f.name}" exceeds the 20MB limit.`);
+        toast.error(`File "${f.name}" (${(f.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 20MB limit.`);
         return;
       }
+      totalBytes += f.size;
+    }
+
+    if (totalBytes > MAX_BATCH_SIZE) {
+      toast.error(`The combined size of selected files (${(totalBytes / (1024 * 1024)).toFixed(1)} MB) exceeds the maximum batch limit of 28 MB. Please upload fewer or smaller files.`);
+      return;
     }
 
     setUploadingDoc(prev => ({ ...prev, [reqKey]: true }));
     const formData = new FormData();
     filesArray.forEach(f => formData.append('files[]', f));
-    formData.append('file', filesArray[0]);
     formData.append('doc_type', reqKey);
     formData.append('label', reqName);
     formData.append('requirement_name', reqName);
@@ -182,11 +194,16 @@ export default function RenewApplication() {
     try {
       const res = await api.post('/documents/upload', formData);
       const newDocs = res.data?.documents || (Array.isArray(res.data) ? res.data : [res.data]);
+      const acknowledgedCount = res.data?.count ?? (Array.isArray(res.data?.documents) ? res.data.documents.length : newDocs.length);
       setDocuments(prev => {
         const newIds = new Set(newDocs.map(d => d.id));
         return [...prev.filter(d => !newIds.has(d.id)), ...newDocs];
       });
-      toast.success(filesArray.length > 1 ? `${filesArray.length} attachments uploaded!` : `${reqName} uploaded successfully!`);
+      if (acknowledgedCount < filesArray.length) {
+        toast.warning(`${acknowledgedCount} of ${filesArray.length} files were acknowledged. Some files may not have been saved.`);
+      } else {
+        toast.success(acknowledgedCount > 1 ? `All ${acknowledgedCount} attachments uploaded!` : `${reqName} uploaded successfully!`);
+      }
     } catch (err) {
       toastError(err, 'Failed to upload document.');
       throw err;
@@ -247,17 +264,8 @@ export default function RenewApplication() {
   const handlePreviewDoc = async (docId) => {
     const newTab = window.open('about:blank', '_blank');
     try {
-      const res = await api.get(`/documents/${docId}/view`);
-      const url = res.data?.url || res.data?.preview_url;
-      if (url) {
-        if (newTab) newTab.location.href = url;
-        else window.open(url, '_blank', 'noopener,noreferrer');
-      } else {
-        if (newTab) newTab.close();
-        throw new Error('No preview URL available');
-      }
+      await previewDocumentBlob(docId, { newTab });
     } catch (err) {
-      if (newTab) newTab.close();
       toastError(err, 'Could not preview document.');
     }
   };

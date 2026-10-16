@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { api, toastError } from '@/lib/api';
+import { api, toastError, previewDocumentBlob } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -297,14 +297,35 @@ export default function DocumentManager({
       }
     }
 
+    // ── Batch Preflight Validation ──────────────────────────────────
+    if (filesArray.length > 10) {
+      toast.error('You may upload a maximum of 10 files per batch. Please upload additional documents in subsequent batches.');
+      return;
+    }
+
+    const MAX_SINGLE_SIZE = 20 * 1024 * 1024; // 20 MB
+    const MAX_BATCH_SIZE = 28 * 1024 * 1024;  // 28 MB (leaves safety margin under PHP post_max_size 35M)
+    let totalBytes = 0;
+    for (const f of filesArray) {
+      if (f.size > MAX_SINGLE_SIZE) {
+        toast.error(`File "${f.name}" (${(f.size / (1024 * 1024)).toFixed(1)} MB) exceeds the maximum allowed limit of 20MB.`);
+        return;
+      }
+      totalBytes += f.size;
+    }
+    if (totalBytes > MAX_BATCH_SIZE) {
+      toast.error(`The combined size of selected files (${(totalBytes / (1024 * 1024)).toFixed(1)} MB) exceeds the maximum batch limit of 28 MB. Please select fewer or smaller files.`);
+      return;
+    }
+
     setUploading(prev => ({ ...prev, [docType]: true }));
     setUploadProgress(prev => ({ ...prev, [docType]: 0 }));
 
     const formData = new FormData();
+    // Transmit each file exactly once under files[]
     filesArray.forEach(f => {
       formData.append('files[]', f);
     });
-    formData.append('file', filesArray[0]);
     formData.append('doc_type', docType);
     formData.append('application_id', currentAppId);
     if (reqConfig?.name) {
@@ -328,6 +349,7 @@ export default function DocumentManager({
       });
 
       const newDocs = res.data?.documents || (Array.isArray(res.data) ? res.data : [res.data]);
+      const acknowledgedCount = res.data?.count ?? (Array.isArray(res.data?.documents) ? res.data.documents.length : newDocs.length);
 
       // Retain existing uploaded attachments, add newly uploaded attachments
       setDocuments(prev => {
@@ -337,11 +359,15 @@ export default function DocumentManager({
       });
 
       setShowErrors(false);
-      toast.success(
-        newDocs.length > 1
-          ? `${newDocs.length} attachments uploaded successfully!`
-          : 'Document uploaded successfully!'
-      );
+      if (acknowledgedCount < filesArray.length) {
+        toast.warning(`${acknowledgedCount} of ${filesArray.length} files were acknowledged. Some files may not have been saved.`);
+      } else {
+        toast.success(
+          acknowledgedCount > 1
+            ? `All ${acknowledgedCount} attachments uploaded successfully!`
+            : 'Document uploaded successfully!'
+        );
+      }
     } catch (err) {
       toastError(err, 'Failed to upload document(s).');
       throw err;
@@ -524,24 +550,10 @@ export default function DocumentManager({
     const docId = typeof docOrId === 'object' && docOrId !== null ? docOrId.id : docOrId;
     if (!docId) return;
 
-    // Immediately open window reference during user gesture to avoid popup blocker
     const newTab = window.open('about:blank', '_blank');
-
     try {
-      const res = await api.get(`/documents/${docId}/view`);
-      const fileUrl = res.data?.url || res.data?.preview_url;
-      if (fileUrl) {
-        if (newTab) {
-          newTab.location.href = fileUrl;
-        } else {
-          window.open(fileUrl, '_blank', 'noopener,noreferrer');
-        }
-      } else {
-        if (newTab) newTab.close();
-        throw new Error('No preview URL available');
-      }
+      await previewDocumentBlob(docId, { newTab });
     } catch (err) {
-      if (newTab) newTab.close();
       toastError(err, 'Could not preview document. Please try again.');
     }
   };

@@ -99,9 +99,26 @@ export default function RequirementUploadField({
     return null;
   };
 
+  const MAX_BATCH_FILES = 10;
+  const MAX_BATCH_SIZE_BYTES = 28 * 1024 * 1024; // 28MB batch limit
+
   const handleFileSelection = (newFileList) => {
     if (!newFileList || newFileList.length === 0) return;
     const filesArray = Array.from(newFileList);
+
+    if (stagedFiles.length + filesArray.length > MAX_BATCH_FILES) {
+      toast.error(`You may stage a maximum of ${MAX_BATCH_FILES} files per batch. You currently have ${stagedFiles.length} file(s) staged. Please upload in smaller batches.`);
+      return;
+    }
+
+    const currentStagedSize = stagedFiles.reduce((sum, sf) => sum + sf.size, 0);
+    const newFilesSize = filesArray.reduce((sum, f) => sum + f.size, 0);
+    if (currentStagedSize + newFilesSize > MAX_BATCH_SIZE_BYTES) {
+      const totalMb = ((currentStagedSize + newFilesSize) / (1024 * 1024)).toFixed(1);
+      toast.error(`The combined size of selected files (${totalMb} MB) exceeds the 28 MB batch limit. Please upload fewer or smaller files.`);
+      return;
+    }
+
     const errors = [];
     const validItems = [];
 
@@ -179,6 +196,15 @@ export default function RequirementUploadField({
 
   const handleUploadStaged = async () => {
     if (stagedFiles.length === 0 || !onUpload) return;
+    if (stagedFiles.length > MAX_BATCH_FILES) {
+      toast.error(`Maximum ${MAX_BATCH_FILES} files allowed per upload.`);
+      return;
+    }
+    const totalBytes = stagedFiles.reduce((acc, sf) => acc + sf.size, 0);
+    if (totalBytes > MAX_BATCH_SIZE_BYTES) {
+      toast.error('The combined size of files exceeds the 28 MB limit.');
+      return;
+    }
     const filesToUpload = stagedFiles.map(s => s.file);
     try {
       await onUpload(filesToUpload, docKey, requirement);
