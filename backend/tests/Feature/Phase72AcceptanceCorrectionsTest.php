@@ -9,6 +9,7 @@ use App\Models\AuditLog;
 use App\Models\ApplicantProfile;
 use App\Services\SupabaseStorageService;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Hash;
 
 class Phase72AcceptanceCorrectionsTest extends TestCase
 {
@@ -16,6 +17,7 @@ class Phase72AcceptanceCorrectionsTest extends TestCase
 
     protected User $admin;
     protected User $superAdmin;
+    protected User $applicant;
 
     protected function setUp(): void
     {
@@ -35,6 +37,15 @@ class Phase72AcceptanceCorrectionsTest extends TestCase
             'full_name' => 'Super Administrator',
             'role' => 'super_admin',
             'is_active' => true,
+        ]);
+
+        $this->applicant = User::create([
+            'id' => (string) Str::uuid(),
+            'email' => 'applicant@test.com',
+            'full_name' => 'Test Applicant',
+            'role' => 'applicant',
+            'is_active' => true,
+            'dpa_consent' => true,
         ]);
     }
 
@@ -219,9 +230,9 @@ class Phase72AcceptanceCorrectionsTest extends TestCase
         $downloaded = $service->download($testPath);
         $this->assertEquals($content, $downloaded);
 
-        // 3. Signed URL (mock offline URL)
+        // 3. Preview URL
         $url = $service->getSignedUrl($testPath);
-        $this->assertStringContainsString('/storage/mock/', $url);
+        $this->assertStringContainsString('/api/documents/', $url);
 
         // 4. Move
         $newPath = 'testing/moved_' . Str::random(8) . '.txt';
@@ -248,11 +259,53 @@ class Phase72AcceptanceCorrectionsTest extends TestCase
     public function test_supabase_storage_service_rejects_directory_traversal(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('Directory traversal detected in storage path');
 
         config(['services.supabase.driver' => 'local']);
         $service = new SupabaseStorageService();
         $service->upload('../secret.txt', 'malicious content', 'text/plain');
+    }
+
+    public function test_supabase_storage_service_rejects_malicious_bucket_names(): void
+    {
+        config(['services.supabase.driver' => 'local']);
+        $service = new SupabaseStorageService();
+
+        $maliciousBuckets = ['.', '..', 'bucket/with/slash', 'bucket.with.dots', 'bucket with spaces', ''];
+        foreach ($maliciousBuckets as $badBucket) {
+            try {
+                $service->upload('safe/path.txt', 'data', 'text/plain', $badBucket);
+                $this->fail("Failed to reject malicious bucket name: {$badBucket}");
+            } catch (\InvalidArgumentException $e) {
+                $this->assertStringContainsString('Invalid or unsafe storage bucket name', $e->getMessage());
+            }
+        }
+    }
+
+    public function test_supabase_storage_service_rejects_malicious_file_paths(): void
+    {
+        config(['services.supabase.driver' => 'local']);
+        $service = new SupabaseStorageService();
+
+        $maliciousPaths = [
+            '',
+            '/',
+            '///',
+            'C:/Windows/system32/cmd.exe',
+            '/etc/passwd',
+            '..',
+            '../secret.txt',
+            'folder/../../secret.txt',
+            "test/\0evil.txt",
+        ];
+
+        foreach ($maliciousPaths as $badPath) {
+            try {
+                $service->upload($badPath, 'data', 'text/plain');
+                $this->fail("Failed to reject malicious file path: {$badPath}");
+            } catch (\InvalidArgumentException $e) {
+                $this->assertTrue(true);
+            }
+        }
     }
 
     public function test_supabase_storage_service_fails_safely_when_live_credentials_missing(): void
@@ -267,5 +320,149 @@ class Phase72AcceptanceCorrectionsTest extends TestCase
         ]);
         $service = new SupabaseStorageService();
         $service->upload('test/file.txt', 'content', 'text/plain');
+    }
+
+    public function test_walkin_creation_requires_dpa_consent_attestation(): void
+    {
+        // 1. Omitted key -> 422
+        $omittedRes = $this->actingAs($this->admin)->postJson('/api/admin/users', [
+            'full_name' => 'Omitted Attestation Applicant',
+            'email'     => 'omitted@example.com',
+            'role'      => 'applicant',
+            'password'  => 'TemporaryPass123!',
+        ]);
+        $omittedRes->assertStatus(422);
+        $omittedRes->assertJsonValidationErrors(['dpa_consent_attested']);
+
+        // 2. Explicit false -> 422
+        $falseRes = $this->actingAs($this->admin)->postJson('/api/admin/users', [
+            'full_name'            => 'False Attestation Applicant',
+            'email'                => 'false@example.com',
+            'role'                 => 'applicant',
+            'password'             => 'TemporaryPass123!',
+            'dpa_consent_attested' => false,
+        ]);
+        $falseRes->assertStatus(422);
+        $falseRes->assertJsonValidationErrors(['dpa_consent_attested']);
+
+        // 3. Explicit true -> 201
+        $trueRes = $this->actingAs($this->admin)->postJson('/api/admin/users', [
+            'full_name'            => 'Valid Attested Applicant',
+            'email'                => 'valid.attested@example.com',
+            'role'                 => 'applicant',
+            'password'             => 'TemporaryPass123!',
+            'dpa_consent_attested' => true,
+        ]);
+        $trueRes->assertStatus(201);
+        $this->assertDatabaseHas('users', [
+            'email'       => 'valid.attested@example.com',
+            'dpa_consent' => true,
+        ]);
+    }
+
+    public function test_authenticated_document_preview_and_idor_protection(): void
+    {
+        config(['services.supabase.driver' => 'local']);
+
+        // 1. Seed document owned by $this->applicant
+        $storage = new SupabaseStorageService();
+        $testDocPath = 'applications/test-uuid/id_card.pdf';
+        $storage->upload($testDocPath, 'SYNTHETIC_PDF_BINARY_DATA', 'application/pdf');
+
+        $category = \App\Models\Category::create([
+            'id' => (string) Str::uuid(),
+            'code' => 'CAT_A_' . Str::random(4),
+            'name' => 'Category A',
+            'is_active' => true,
+        ]);
+
+        $req = \App\Models\DocumentaryRequirement::create([
+            'id' => (string) Str::uuid(),
+            'category_id' => $category->id,
+            'name' => 'ID Card',
+            'is_required' => true,
+        ]);
+
+        $app = \App\Models\Application::create([
+            'id' => (string) Str::uuid(),
+            'user_id' => $this->applicant->id,
+            'category_id' => $category->id,
+            'reference_no' => 'APP-2026-PREVIEW',
+            'status' => 'draft',
+            'application_type' => 'new_id',
+        ]);
+
+        $doc = \App\Models\Document::create([
+            'application_id'         => $app->id,
+            'requirement_id'         => $req->id,
+            'user_id'                => $this->applicant->id,
+            'storage_path'           => $testDocPath,
+            'permanent_storage_path' => $testDocPath,
+            'original_filename'      => 'id_card.pdf',
+            'mime_type'              => 'application/pdf',
+            'file_size'              => 26,
+            'storage_status'         => 'promoted',
+            'review_status'          => 'approved',
+        ]);
+
+        $applicantToken = $this->applicant->createToken('test-applicant')->plainTextToken;
+        $adminToken = $this->admin->createToken('test-admin')->plainTextToken;
+
+        // 2. Applicant views own document via view endpoint - verify NO token is in URL
+        $viewRes = $this->actingAs($this->applicant)->getJson("/api/documents/{$doc->id}/view");
+        $viewRes->assertStatus(200);
+        $this->assertStringContainsString("/api/documents/{$doc->id}/preview", $viewRes->json('url'));
+        $this->assertStringNotContainsString('token=', $viewRes->json('url'));
+
+        // 3. Security check: Token passed ONLY as query parameter must be REJECTED (401 Unauthenticated)
+        app('auth')->forgetGuards();
+        $queryTokenRes = $this->getJson("/api/documents/{$doc->id}/preview?token={$applicantToken}");
+        $queryTokenRes->assertStatus(401);
+
+        // 4. Applicant previews own document via standard Authorization header
+        $this->flushHeaders();
+        app('auth')->forgetGuards();
+        $streamRes = $this->withToken($applicantToken)->get("/api/documents/{$doc->id}/preview");
+        $streamRes->assertStatus(200);
+        $this->assertEquals('application/pdf', $streamRes->headers->get('Content-Type'));
+        $this->assertEquals('SYNTHETIC_PDF_BINARY_DATA', $streamRes->getContent());
+
+        // 5. Admin previews applicant document via standard Authorization header
+        $this->flushHeaders();
+        app('auth')->forgetGuards();
+        $adminStreamRes = $this->withToken($adminToken)->get("/api/admin/documents/{$doc->id}/preview");
+        $adminStreamRes->assertStatus(200);
+        $this->assertEquals('application/pdf', $adminStreamRes->headers->get('Content-Type'));
+        $this->assertEquals('SYNTHETIC_PDF_BINARY_DATA', $adminStreamRes->getContent());
+
+        // 6. Unauthorized access (IDOR): Another applicant attempts to access $doc via Authorization header -> 403
+        $otherApplicant = User::create([
+            'full_name'         => 'Other Citizen',
+            'email'             => 'other.citizen@example.com',
+            'password_hash'     => Hash::make('OtherPassword123!'),
+            'role'              => 'applicant',
+            'auth_provider'     => 'local',
+            'is_active'         => true,
+            'email_verified_at' => now(),
+            'dpa_consent'       => true,
+        ]);
+        $otherToken = $otherApplicant->createToken('other-token')->plainTextToken;
+
+        $this->flushHeaders();
+        app('auth')->forgetGuards();
+        $idorRes = $this->withToken($otherToken)->getJson("/api/documents/{$doc->id}/preview");
+        $idorRes->assertStatus(403);
+
+        // 7. Unauthenticated access without any token -> 401
+        $this->flushHeaders();
+        app('auth')->forgetGuards();
+        $unauthRes = $this->getJson("/api/documents/{$doc->id}/preview");
+        $unauthRes->assertStatus(401);
+
+        // 8. Privilege escalation: Applicant attempting to access admin preview -> 403
+        $this->flushHeaders();
+        app('auth')->forgetGuards();
+        $forbiddenAdminRes = $this->withToken($applicantToken)->getJson("/api/admin/documents/{$doc->id}/preview");
+        $forbiddenAdminRes->assertStatus(403);
     }
 }

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { api, toastError } from '@/lib/api';
+import { api, toastError, previewDocumentBlob } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -420,9 +420,9 @@ export default function ApplicationDetail() {
   };
 
   const handlePreviewDoc = async (docId) => {
+    const newTab = window.open('about:blank', '_blank');
     try {
-      const res = await api.get(`/admin/documents/${docId}/view`);
-      window.open(res.data.url, '_blank');
+      await previewDocumentBlob(docId, { isAdmin: true, newTab });
     } catch (err) {
       toastError(err, 'Could not generate document preview. Please try again.');
     }

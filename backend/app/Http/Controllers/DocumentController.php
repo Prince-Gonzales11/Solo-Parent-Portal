@@ -542,7 +542,9 @@ class DocumentController extends Controller
 
             $path = $doc->active_storage_path;
             
-            if ($doc->storage_status === 'promoted') {
+            if ($storage->isLocalDriver()) {
+                $url = url("/api/documents/{$id}/preview");
+            } elseif ($doc->storage_status === 'promoted') {
                 $url = $storage->getSignedUrl($path, 900);
             } else {
                 $url = $storage->getTemporarySignedUrl($path, 900);
@@ -753,7 +755,9 @@ class DocumentController extends Controller
 
             $path = $doc->active_storage_path;
             
-            if ($doc->storage_status === 'promoted') {
+            if ($storage->isLocalDriver()) {
+                $url = url("/api/admin/documents/{$id}/preview");
+            } elseif ($doc->storage_status === 'promoted') {
                 $url = $storage->getSignedUrl($path, 900);
             } else {
                 $url = $storage->getTemporarySignedUrl($path, 900);

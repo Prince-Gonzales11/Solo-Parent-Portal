@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { api, toastError } from '@/lib/api';
+import { api, toastError, previewDocumentBlob } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -524,24 +524,10 @@ export default function DocumentManager({
     const docId = typeof docOrId === 'object' && docOrId !== null ? docOrId.id : docOrId;
     if (!docId) return;
 
-    // Immediately open window reference during user gesture to avoid popup blocker
     const newTab = window.open('about:blank', '_blank');
-
     try {
-      const res = await api.get(`/documents/${docId}/view`);
-      const fileUrl = res.data?.url || res.data?.preview_url;
-      if (fileUrl) {
-        if (newTab) {
-          newTab.location.href = fileUrl;
-        } else {
-          window.open(fileUrl, '_blank', 'noopener,noreferrer');
-        }
-      } else {
-        if (newTab) newTab.close();
-        throw new Error('No preview URL available');
-      }
+      await previewDocumentBlob(docId, { newTab });
     } catch (err) {
-      if (newTab) newTab.close();
       toastError(err, 'Could not preview document. Please try again.');
     }
   };

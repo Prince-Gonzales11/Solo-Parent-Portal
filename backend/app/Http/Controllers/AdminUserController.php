@@ -226,7 +226,7 @@ class AdminUserController extends Controller
             $rules = [
                 'full_name'            => 'required|string|max:200',
                 'password'             => 'required|string|min:8|max:128',
-                'dpa_consent_attested' => 'sometimes|accepted',
+                'dpa_consent_attested' => 'required|accepted',
             ];
 
             $email = trim((string) $request->input('email', ''));

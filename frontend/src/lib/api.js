@@ -44,8 +44,8 @@ export function clearApiCache() {
 // Wrap api.get with intelligent caching & deduplication
 const originalGet = api.get.bind(api);
 api.get = function (url, config = {}) {
-  // If explicitly disabled or non-cacheable
-  if (config.cache === false || config.params?.refresh) {
+  // If explicitly disabled, non-cacheable, or binary blob
+  if (config.cache === false || config.params?.refresh || config.responseType === 'blob') {
     return originalGet(url, config);
   }
 
@@ -272,6 +272,86 @@ export async function logoutUser() {
   } catch {}
   clearAuthSession();
   window.location.href = '/login';
+}
+
+// ─── Authenticated Document Preview Helper ──────────────────────────────────
+// Active blob URL registry for managed lifecycle and clean-up
+const activeBlobRegistry = new Set();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    activeBlobRegistry.forEach(url => {
+      try { URL.revokeObjectURL(url); } catch {}
+    });
+    activeBlobRegistry.clear();
+  });
+}
+
+/**
+ * Opens an authenticated document preview safely in a new browser tab or provided window reference
+ * using URL.createObjectURL() on a fetched Blob.
+ *
+ * Never passes account-level Sanctum tokens in URL query strings.
+ * Keeps the Blob URL active while the preview tab is open so printing and downloading succeed,
+ * and immediately revokes it when the tab is closed.
+ *
+ * @param {string} docId - The UUID of the document
+ * @param {Object} [options]
+ * @param {boolean} [options.isAdmin=false] - Whether to use the admin document preview endpoint
+ * @param {Window|null} [options.newTab=null] - Pre-opened window reference to avoid popup blockers
+ * @returns {Promise<string>} The temporary blob URL
+ */
+export async function previewDocumentBlob(docId, { isAdmin = false, newTab = null } = {}) {
+  const targetWindow = newTab || (typeof window !== 'undefined' ? window.open('about:blank', '_blank') : null);
+  try {
+    const endpoint = isAdmin ? `/admin/documents/${docId}/preview` : `/documents/${docId}/preview`;
+    const res = await api.get(endpoint, {
+      cache: false,
+      responseType: 'blob',
+    });
+
+    const contentType = res.headers?.['content-type'] || 'application/pdf';
+    const blob = new Blob([res.data], { type: contentType });
+    const blobUrl = URL.createObjectURL(blob);
+
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.location.href = blobUrl;
+    } else if (typeof window !== 'undefined') {
+      window.open(blobUrl, '_blank', 'noopener,noreferrer');
+    }
+
+    activeBlobRegistry.add(blobUrl);
+
+    const cleanup = () => {
+      try { URL.revokeObjectURL(blobUrl); } catch {}
+      activeBlobRegistry.delete(blobUrl);
+      if (pollTimer) clearInterval(pollTimer);
+    };
+
+    // Monitor preview tab: revoke immediately when the user closes the preview tab
+    let pollTimer = null;
+    if (targetWindow) {
+      pollTimer = setInterval(() => {
+        try {
+          if (!targetWindow || targetWindow.closed) {
+            cleanup();
+          }
+        } catch {
+          cleanup();
+        }
+      }, 2000);
+    }
+
+    // Safety backstop: 30-minute fallback ensures long documents can be viewed/printed without premature revocation
+    setTimeout(cleanup, 1800000);
+
+    return blobUrl;
+  } catch (err) {
+    if (targetWindow && !targetWindow.closed) {
+      targetWindow.close();
+    }
+    throw err;
+  }
 }
 
 // ─── Response Interceptor ─────────────────────────────────────────────────────

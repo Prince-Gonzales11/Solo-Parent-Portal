@@ -158,6 +158,7 @@ class QaSecurityAndIntegrityFixesTest extends TestCase
             'password' => 'SecureP@ssw0rd2026!',
             'role' => 'applicant',
             'is_active' => true,
+            'dpa_consent_attested' => true,
         ]);
         $provRes->assertStatus(201);
         $newUserId = $provRes->json('id');

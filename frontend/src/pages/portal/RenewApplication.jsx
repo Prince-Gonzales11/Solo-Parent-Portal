@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { api, toastError } from '@/lib/api';
+import { api, toastError, previewDocumentBlob } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -247,17 +247,8 @@ export default function RenewApplication() {
   const handlePreviewDoc = async (docId) => {
     const newTab = window.open('about:blank', '_blank');
     try {
-      const res = await api.get(`/documents/${docId}/view`);
-      const url = res.data?.url || res.data?.preview_url;
-      if (url) {
-        if (newTab) newTab.location.href = url;
-        else window.open(url, '_blank', 'noopener,noreferrer');
-      } else {
-        if (newTab) newTab.close();
-        throw new Error('No preview URL available');
-      }
+      await previewDocumentBlob(docId, { newTab });
     } catch (err) {
-      if (newTab) newTab.close();
       toastError(err, 'Could not preview document.');
     }
   };

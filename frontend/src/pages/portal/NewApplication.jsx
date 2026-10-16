@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { api, toastError } from '@/lib/api';
+import { api, toastError, previewDocumentBlob } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -203,20 +203,8 @@ export default function NewApplication() {
   const handlePreview = async (id) => {
     const newTab = window.open('about:blank', '_blank');
     try {
-      const res = await api.get(`/documents/${id}/view`);
-      const fileUrl = res.data?.url || res.data?.preview_url;
-      if (fileUrl) {
-        if (newTab) {
-          newTab.location.href = fileUrl;
-        } else {
-          window.open(fileUrl, '_blank', 'noopener,noreferrer');
-        }
-      } else {
-        if (newTab) newTab.close();
-        throw new Error('No preview URL available');
-      }
+      await previewDocumentBlob(id, { newTab });
     } catch (err) {
-      if (newTab) newTab.close();
       toastError(err, 'Preview unavailable.');
     }
   };

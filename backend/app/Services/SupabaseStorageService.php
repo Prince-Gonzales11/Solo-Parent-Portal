@@ -40,6 +40,11 @@ class SupabaseStorageService
         }
     }
 
+    public function isLocalDriver(): bool
+    {
+        return $this->driver === 'local' || $this->driver === 'mock';
+    }
+
     /**
      * Resolve and validate a local mock storage path, strictly preventing directory traversal.
      *
@@ -50,21 +55,70 @@ class SupabaseStorageService
      */
     protected function resolveLocalPath(string $bucket, string $path): string
     {
-        if (!preg_match('/^[a-zA-Z0-9_\-\.]+$/', $bucket)) {
-            throw new \InvalidArgumentException("Invalid storage bucket name: {$bucket}");
+        // 1. Bucket validation: reject empty, reject . and .., reject any characters not strictly alphanumeric, underscore, or hyphen
+        $bucketTrimmed = trim($bucket);
+        if ($bucketTrimmed === '' || $bucketTrimmed === '.' || $bucketTrimmed === '..' || !preg_match('/^[a-zA-Z0-9_\-]+$/', $bucketTrimmed)) {
+            throw new \InvalidArgumentException("Invalid or unsafe storage bucket name: {$bucket}");
         }
 
-        // Sanitize path: normalize slashes, eliminate leading slashes, reject directory traversal
-        $cleanPath = ltrim(str_replace('\\', '/', $path), '/');
+        // 2. Storage path validation: reject empty, null bytes, absolute paths, and Windows drive letters
+        if (str_contains($path, "\0")) {
+            throw new \InvalidArgumentException("Null byte detected in storage path.");
+        }
+
+        $normalized = str_replace('\\', '/', $path);
+        if (preg_match('/^[a-zA-Z]:/', $path) || str_starts_with($normalized, '/') || str_starts_with($path, '\\')) {
+            throw new \InvalidArgumentException("Absolute paths are not permitted in storage operations: {$path}");
+        }
+
+        $cleanPath = trim($normalized, '/');
+        if ($cleanPath === '') {
+            throw new \InvalidArgumentException("Storage path cannot be empty.");
+        }
+
+        // 3. Segment traversal checks: reject empty segments, '.', '..'
         $segments = explode('/', $cleanPath);
         foreach ($segments as $segment) {
-            if ($segment === '..' || $segment === '.') {
-                throw new \InvalidArgumentException("Directory traversal detected in storage path: {$path}");
+            $trimmedSegment = trim($segment);
+            if ($trimmedSegment === '' || $trimmedSegment === '.' || $trimmedSegment === '..') {
+                throw new \InvalidArgumentException("Directory traversal or empty segment detected in storage path: {$path}");
             }
         }
 
-        $baseDir = rtrim(str_replace('\\', '/', $this->localStoragePath), '/');
-        return $baseDir . '/' . $bucket . '/' . $cleanPath;
+        // 4. Ensure designated local mock storage root directory exists
+        if (!is_dir($this->localStoragePath)) {
+            mkdir($this->localStoragePath, 0750, true);
+        }
+
+        $canonicalBase = realpath($this->localStoragePath);
+        if ($canonicalBase === false) {
+            $canonicalBase = rtrim(str_replace('\\', '/', $this->localStoragePath), '/');
+        }
+
+        // Build target full path
+        $targetBucketDir = $canonicalBase . DIRECTORY_SEPARATOR . $bucketTrimmed;
+        $targetFullPath = $targetBucketDir . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $segments);
+
+        // 5. Canonical symlink / junction breakout check
+        if (file_exists($targetFullPath)) {
+            $realTarget = realpath($targetFullPath);
+            if ($realTarget === false || (!str_starts_with($realTarget, $canonicalBase . DIRECTORY_SEPARATOR) && $realTarget !== $canonicalBase)) {
+                throw new \InvalidArgumentException("Storage path escapes designated mock-storage root via symlink: {$path}");
+            }
+        } else {
+            $parent = dirname($targetFullPath);
+            while (!file_exists($parent) && $parent !== dirname($parent)) {
+                $parent = dirname($parent);
+            }
+            if (file_exists($parent)) {
+                $realParent = realpath($parent);
+                if ($realParent === false || (!str_starts_with($realParent, $canonicalBase . DIRECTORY_SEPARATOR) && $realParent !== $canonicalBase)) {
+                    throw new \InvalidArgumentException("Storage parent path escapes designated mock-storage root via symlink: {$path}");
+                }
+            }
+        }
+
+        return $targetFullPath;
     }
 
     /**
@@ -154,9 +208,15 @@ class SupabaseStorageService
 
         if ($this->driver === 'local' || $this->driver === 'mock') {
             $this->resolveLocalPath($bucket, $path);
-            $encodedBucket = rawurlencode($bucket);
+            $doc = \App\Models\Document::where('permanent_storage_path', $path)
+                ->orWhere('storage_path', $path)
+                ->orWhere('temporary_storage_path', $path)
+                ->first();
+            if ($doc) {
+                return url("/api/documents/{$doc->id}/preview");
+            }
             $cleanPath = ltrim(str_replace('\\', '/', $path), '/');
-            return url("/storage/mock/{$encodedBucket}/{$cleanPath}?token=mock_signature&expires=" . (time() + $expiresIn));
+            return url("/api/documents/preview?bucket=" . rawurlencode($bucket) . "&path=" . rawurlencode($cleanPath));
         }
 
         $this->ensureLiveConfigured();
